@@ -1,0 +1,10 @@
+[package]
+name = "phoenixentertainment/systemname-client"
+description = "Client side of some system"
+version = "0.0.0-test.1"
+authors = ["Noble_Draconian"]
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+
+[dependencies]
+DragonEngine = "nobledraconian/dragon-engine@2.0.0"

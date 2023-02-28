@@ -1,0 +1,57 @@
+name : System Release
+on:
+  push:
+    tags:
+      - 'v*'
+jobs:
+  release:
+    name: Create system release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
+
+    - name: Setup foreman
+      uses: rojo-rbx/setup-foreman@62bc697705339a6049f74c9d0ff6d39cffc993e5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Install dependencies
+      run: |
+        wally install --project-path Server/
+        wally install --project-path Client/
+
+    - name: Build system components
+      run: |
+        rojo build Server/standalone.project.json --output Temp/SystemName_Server.rbxm
+        rojo build Client/standalone.project.json --output Temp/SystemName_Client.rbxm
+
+    - name: Create release
+      id: create_release
+      uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: ${{ github.ref }}
+        draft: true
+    
+    - name: Upload system server component
+      uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: Temp/SystemName_Server.rbxm
+        asset_name: SystemName_Server_${{ github.ref_name }}.rbxm
+        asset_content_type: application/octet-stream
+
+    - name: Upload system client component
+      uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: Temp/SystemName_Client.rbxm
+        asset_name: SystemName_Client_${{ github.ref_name }}.rbxm
+        asset_content_type: application/octet-stream
