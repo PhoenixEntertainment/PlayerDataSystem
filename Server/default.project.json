@@ -1,5 +1,5 @@
 {
-	"name" : "userinputsystem-client",
+	"name" : "playerdatasystem-server",
 	
 	"tree" : {
 		"$path" : "src"

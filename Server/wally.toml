@@ -1,10 +1,11 @@
 [package]
-name = "phoenixentertainment/systemname-server"
-description = "Some system server"
+name = "phoenixentertainment/playerdatasystem-server"
+description = "Player data system server"
 version = "0.0.0-test.1"
 authors = ["Noble_Draconian"]
-realm = "shared"
+realm = "server"
 registry = "https://github.com/UpliftGames/wally-index"
 
 [dependencies]
 DragonEngine = "nobledraconian/dragon-engine@2.0.0"
+roblox-libmodules = "nobledraconian/roblox-libmodules@3.1.0"

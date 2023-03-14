@@ -1,95 +1,107 @@
 --[[
-	Example Controller
-	This is an example Controller to display how a Controller is created and how it should be formatted.
+	Data controller
+	Handles the fetching of the player's data
 --]]
 
-local ExampleController={}
+local DataController = {}
+
+---------------------
+-- Roblox Services --
+---------------------
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 ------------------
 -- Dependencies --
 ------------------
-local ExampleService;
+local DataService;
 
 -------------
--- DEFINES --
+-- Defines --
 -------------
-local Connections={} --Holds all event connections to allow for state cleanup if the controller is stopped.
-local ControllerRunning = false --Used to determine when the controller is stopped
-local Generation_Interval = 3 --The interval (in seconds) at which to generate new GUIDs.
+local DataCache;
+local PlayerData;
+local IsDataLoaded = false
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : GetGUID
--- @Description : This is an example controller method.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function ExampleController:GetGUID()
-	self:Log("[Example Controller] Getting new GUID from server.")
-
-	return self.Services.ExampleService:GetGUID()
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : IsDataLoaded
+-- @Description : Returns a bool describing whether or not the player's data has been fully replicated in
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:IsDataLoaded()
+	return IsDataLoaded
 end
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : GetData
+-- @Description : Gets the player's data
+-- @Params : bool "YieldForLoad" - A bool describing whether or not the API will yield for the data to exist
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:GetData(YieldForLoad)
+	if YieldForLoad then
+		while true do
+			if self:IsDataLoaded() then
+				break
+			else
+				RunService.Stepped:wait()
+			end
+		end
+	end
+
+	return PlayerData
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- @Name : Init
--- @Description : Called when the Controller module is first loaded.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function ExampleController:Init()
-	ExampleService = self:GetService("ExampleService")
+-- @Description : Used to initialize controller state
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:Init()
+	self:DebugLog("[Data Controller] Initializing...")
 
-	self:DebugLog("[Example Controller] Initialized!")
-end
+	DataService = self:GetService("DataService")
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Start
--- @Description : Called after all Controllers are loaded.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function ExampleController:Start()
-	self:DebugLog("[Example Controller] Started!")
-	ControllerRunning = true
+	-----------------------------------
+	-- Waiting for data to be loaded --
+	-----------------------------------
+	local Loaded = false
+	local LoadedID = DataService:GetDataLoadedQueueID()
 
-	--------------------------------------------
-	-- Listen for GUID creation on the server --
-	--------------------------------------------
-	local GUIDListener = ExampleService.GUIDGenerated:connect(function(GUID)
-		self:Log("[Example Controller] Example Service just generated the GUID '" .. GUID .. "'.")
+	DataService.DataLoaded:connect(function(QueueID)
+		if QueueID == LoadedID then
+			Loaded = true
+		end
 	end)
-	table.insert(Connections,GUIDListener)
 
-	-------------------------------------------
-	-- Generationg a new GUID at an interval --
-	-------------------------------------------
-	while ControllerRunning do
-		task.wait(Generation_Interval)
-		local GUID = ExampleService:GetGUID()
-		self:Log("[Example Controller] New GUID is '"..GUID.."'.")
-	end
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Stop
--- @Description : Called when the controller is being stopped.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function ExampleController:Stop()
-
-	ControllerRunning = false
-
-	-------------------------------------------
-	-- Disconnect and remove all connections --
-	-------------------------------------------
-	for Index = 1,#Connections do
-		Connections[1]:Disconnect()
-		table.remove(Connections,Index)
+	while true do
+		if Loaded then
+			break
+		else
+			RunService.Stepped:wait()
+		end
 	end
 
-	self:Log("[Example Controller] Stopped!")
+	local DescendantCount = DataService:GetDataFolderDescendantCount()
+	DataCache = ReplicatedStorage:WaitForChild("_DataCache")
+	PlayerData = DataCache:WaitForChild(tostring(Players.LocalPlayer.UserId))
+
+	while true do
+		if #self:GetData():GetDescendants() >= DescendantCount then
+			break
+		end
+		RunService.Stepped:wait()
+	end
+	IsDataLoaded = true
+
+	self:DebugLog("[Data Controller] Initialized!")
 end
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Unload
--- @Description : Called when the controller is being unloaded.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function ExampleController:Unload()
-
-	self:Log("[Example Controller] Unloaded!")
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Start
+-- @Description : Used to run the controller
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:Start()
+	self:DebugLog("[Data Controller] Running!")
+	
 end
 
-
-return ExampleController
+return DataController

@@ -5,3 +5,4 @@ Temp/*
 Env/*
 !Env/.gitkeep
 Packages/
+*.rbxl

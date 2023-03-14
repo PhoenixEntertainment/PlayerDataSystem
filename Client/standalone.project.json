@@ -4,6 +4,6 @@
 	"tree" : {
 		"$path" : "Packages",
 
-		"systemname-client" : {"$path" : "default.project.json"}
+		"playerdatasystem-client" : {"$path" : "default.project.json"}
 	}
 }

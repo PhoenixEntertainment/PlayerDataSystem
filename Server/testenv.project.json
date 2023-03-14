@@ -6,18 +6,14 @@
 		"ReplicatedStorage": {
 			"$className" : "ReplicatedStorage",
 			
-			"Packages" : {"$path" : "Packages"}
+			"Packages" : {"$path" : "standalone.project.json"}
 		},
 
 		"ServerScriptService" : {
 			"$className" : "ServerScriptService",
 
 			"Scripts" : {"$path" : "../TestEnv/Server/Scripts"},
-			"Services" : {
-				"$className" : "Folder",
-
-				"ExampleService" : {"$path" : "default.project.json"}
-			}
+			"Services" : {"$path" : "../TestEnv/Server/Services"}
 		},
 
 		"StarterPlayer" : {
