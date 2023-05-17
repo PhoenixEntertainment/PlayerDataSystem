@@ -15,13 +15,13 @@ DataService.Client.Server=DataService
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local DatastoreService = game:GetService("DataStoreService")
 
 ------------------
 -- Dependencies --
 ------------------
 local RobloxLibModules = require(script.Parent["roblox-libmodules"])
 local Table = require(RobloxLibModules.Utils.Table)
-local DatastoreService = require(script.MockDatastoreService)
 local Queue = require(RobloxLibModules.Classes.Queue)
 
 -------------
