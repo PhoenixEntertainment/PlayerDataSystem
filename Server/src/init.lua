@@ -36,6 +36,7 @@ local SESSION_LOCK_YIELD_INTERVAL = 5 -- The time (in seconds) at which the serv
                                       --! The interval should not be below 5 seconds, since Roblox caches keys for 4 seconds.
 local SESSION_LOCK_MAX_YIELD_INTERVALS = 5 -- The maximum amount of times the server will re-check a player's session-lock before ignoring it
 local DataFormat = {_FormatVersion = 1}
+local DataFormatVersion = 1
 local DataFormatConversions = {}
 local DataOperationsQueues = {}
 local DataLoaded_IDs = {}
@@ -388,7 +389,8 @@ end
 -- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
 --            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
 --                                        operation fails.
---            table "Data" - The player's data. Will be nil if the operation fails.
+--            table "Data" - The player's data. Will be default data if the operation fails.
+--            table "Metadata" - Metadata for the player's data. Will be default metadata if the operation fails.
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:LoadData(Player,DatastoreName)
 
@@ -419,55 +421,18 @@ function DataService:LoadData(Player,DatastoreName)
 	-- Defines --
 	-------------
 	local Data_Datastore = DatastoreService:GetDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_Data",tostring(Player.UserId))
-	local Pointer_Datastore = DatastoreService:GetOrderedDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_DataPointers",tostring(Player.UserId))
-	local Data_VersionNumber; --Holds the current version number of the data
-	local Data = Table.Copy(DataFormat) --Holds the player's data
+	local Data_VersionNumber; -- Holds the current version number of the data
+	local Data; -- Holds the player's data
+	local Data_Metadata; -- Holds metadata for the save data
 
-	-------------------------------------------
-	-- Fetching previous data version number --
-	-------------------------------------------
-	local GetDataVersionSuccess,GetDataVersionErrorMessage = pcall(function()
-		local Pages = Pointer_Datastore:GetSortedAsync(false,1)
-		local LatestKey = Pages:GetCurrentPage()[1]
-
-		if LatestKey ~= nil then
-			Data_VersionNumber = LatestKey.value
-		end
-	end)
-	if not GetDataVersionSuccess then --! An error occured while getting the player's data version number
-		self:Log(
-			("[Data Service](LoadData) An error occured while loading data for '%s' : Failed to get data version number, %s")
-			:format(Player.Name,GetDataVersionErrorMessage),
-			"Warning"
-		)
-
-		Data = Table.Copy(DataFormat)
-		DataError:Fire(Player,"Load","FetchDataVersion",Data)
-		self.Client.DataError:FireAllClients(Player,"Load","FetchDataVersion",Data)
-
-		return false,"Failed to load data : Unable to get data version number, "..GetDataVersionErrorMessage,Data
-	else --Data version number fetched successfully, check if new data is being created
-		if Data_VersionNumber == nil then --* It is the first time loading data from this datastore. Player must be new!
-			self:DebugLog(
-				("[Data Service](LoadData) Data created for the first time for player '%s', they may be new!"):format(Player.Name)
-			)
-
-			DataCreated:Fire(Player,Data)
-			self.Client.DataCreated:FireAllClients(Player,Data)
-
-			return true,"Operation Success",Data
-		end	
-	end
-
-	-------------------------------------------------
-	-- Loading player's data from normal datastore --
-	-------------------------------------------------
+	----------------------------------
+	-- Fetching data from datastore --
+	----------------------------------
 	local GetDataSuccess,GetDataErrorMessage = pcall(function()
-		Data = Data_Datastore:GetAsync(tostring(Data_VersionNumber))
+		local KeyInfo;
 
-		if Data == nil then
-			error("Data version " .. Data_VersionNumber .. " was not found.")
-		end
+		Data,KeyInfo= Data_Datastore:GetAsync()
+		Data_Metadata = KeyInfo:GetMetadata()
 	end)
 	if not GetDataSuccess then --! An error occured while getting the player's data
 		self:Log(
@@ -480,26 +445,38 @@ function DataService:LoadData(Player,DatastoreName)
 		DataError:Fire(Player,"Load","FetchData",Data)
 		self.Client.DataError:FireAllClients(Player,"Load","FetchData",Data)
 
-		return false,"Failed to load data : "..GetDataErrorMessage,Data
+		return false,"Failed to load data : " .. GetDataErrorMessage,Data,{FormatVersion = DataFormatVersion}
+	else
+		if Data == nil then -- * It is the first time loading data from this datastore. Player must be new!
+			self:DebugLog(
+				("[Data Service](LoadData) Data created for the first time for player '%s', they may be new!"):format(Player.Name)
+			)
+
+			Data = Table.Copy(DataFormat)
+			DataCreated:Fire(Player,Data)
+			self.Client.DataCreated:FireAllClients(Player,Data)
+
+			return true,"Operation Success",Data,{FormatVersion = DataFormatVersion}
+		end
 	end
 
 	------------------------------------------
 	-- Updating the data's format if needed --
 	------------------------------------------
-	if Data._FormatVersion < DataFormat._FormatVersion then --Data format is outdated, it needs to be updated.
+	if Data_Metadata.FormatVersion < DataFormatVersion then -- Data format is outdated, it needs to be updated.
 		self:DebugLog(
 			("[Data Service](LoadData) %s's data format is oudated, updating..."):format(Player.Name)
 		)
 
 		local DataFormatUpdateSuccess,DataFormatUpdateErrorMessage = pcall(function()
-			for _ = Data._FormatVersion,DataFormat._FormatVersion - 1 do
+			for _ = Data_Metadata.FormatVersion,DataFormatVersion - 1 do
 				self:DebugLog(
 					("[Data Service] Updating %s's data from version %s to version %s...")
-					:format(Player.Name,tostring(Data._FormatVersion),tostring(Data._FormatVersion + 1))
+					:format(Player.Name,tostring(Data_Metadata.FormatVersion),tostring(Data_Metadata.FormatVersion + 1))
 				)
 
-				Data = DataFormatConversions[tostring(Data._FormatVersion).." -> "..tostring(Data._FormatVersion+1)](Data)
-				Data._FormatVersion = Data._FormatVersion + 1
+				Data = DataFormatConversions[tostring(Data_Metadata.FormatVersion) .. " -> " .. tostring(Data_Metadata.FormatVersion + 1)](Data)
+				Data_Metadata.FormatVersion = Data_Metadata.FormatVersion + 1
 			end
 		end)
 
@@ -514,9 +491,9 @@ function DataService:LoadData(Player,DatastoreName)
 			DataError:Fire(Player,"Load","FormatUpdate",Data)
 			self.Client.DataError:FireAllClients(Player,"Load","FormatUpdate",Data)
 
-			return false,"Failed to load data : Update failed, "..DataFormatUpdateErrorMessage,Data
+			return false,"Failed to load data : Update failed, " .. DataFormatUpdateErrorMessage,Data,{FormatVersion = DataFormatVersion}
 		end
-	elseif Data._FormatVersion == nil or Data._FormatVersion > DataFormat._FormatVersion then -- Unreadable data format, do not load data.
+	elseif Data_Metadata.FormatVersion == nil or Data_Metadata.FormatVersion > DataFormatVersion then -- Unreadable data format, do not load data.
 		self:Log(
 			("[Data Service](LoadData) An error occured while loading the data for player '%s' : %s")
 			:format(Player.Name,"Unknown data format"),
@@ -528,14 +505,14 @@ function DataService:LoadData(Player,DatastoreName)
 
 		self.Client.DataError:FireAllClients(Player,"Load","UnknownDatFormat",Data)
 
-		return false,"Failed to load data : Unknown data format",Data
+		return false,"Failed to load data : Unknown data format",Data,{FormatVersion = DataFormatVersion}
 	end
 
 	self:DebugLog(
 		("[Data Service](LoadData) Successfully loaded data for player '%s'!"):format(Player.Name)
 	)
 
-	return true,"Operation Success",Data
+	return true,"Operation Success",Data,Data_Metadata
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -664,6 +641,7 @@ end
 -- @Params : table "Configs" - A dictionary containing the new config values
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:SetConfigs(Configs)
+	DataFormatVersion = Configs.DataFormatVersion
 	DataFormat = Configs.DataFormat
 	DataFormatConversions = Configs.DataFormatConversions
 	DATASTORE_BASE_NAME = Configs.DatastoreBaseName
