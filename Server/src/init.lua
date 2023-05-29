@@ -904,9 +904,11 @@ function DataService:Start()
 	-- Saves player data from servers' cache --
 	-------------------------------------------
 	local function SavePlayerDataFromServer(Player)
-		local PlayerData = self:GetData(Player,false,"Table")
+		local PlayerData,Data_Metadata = self:GetData(Player,false,"Table")
 		local WriteData_Success = false -- Determines whether or not the player's data was successfully saved to datastores
 
+		Data_Metadata["_CanSave"] = nil
+		
 		self:Log(
 			("[Data Service] Saving data for player '%s'..."):format(Player.Name)
 		)
@@ -923,7 +925,7 @@ function DataService:Start()
 				:format(DATASTORE_PRECISE_NAME,Player.Name)
 			)
 
-			local WriteDataSuccess,WriteDataMessage = self:SaveData(Player,DATASTORE_PRECISE_NAME,PlayerData)
+			local WriteDataSuccess,WriteDataMessage = self:SaveData(Player,DATASTORE_PRECISE_NAME,PlayerData,Data_Metadata)
 
 			if not WriteDataSuccess then
 				self:Log(
