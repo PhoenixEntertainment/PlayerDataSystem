@@ -422,7 +422,6 @@ function DataService:LoadData(Player,DatastoreName)
 	-- Defines --
 	-------------
 	local Data_Datastore = DatastoreService:GetDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_Data",tostring(Player.UserId))
-	local Data_VersionNumber; -- Holds the current version number of the data
 	local Data; -- Holds the player's data
 	local Data_Metadata; -- Holds metadata for the save data
 
