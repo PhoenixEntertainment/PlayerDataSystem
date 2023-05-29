@@ -35,7 +35,7 @@ local DATASTORE_RETRY_LIMIT = 2 --The max amount of retries an operation can be 
 local SESSION_LOCK_YIELD_INTERVAL = 5 -- The time (in seconds) at which the server will re-check a player's data session-lock.
                                       --! The interval should not be below 5 seconds, since Roblox caches keys for 4 seconds.
 local SESSION_LOCK_MAX_YIELD_INTERVALS = 5 -- The maximum amount of times the server will re-check a player's session-lock before ignoring it
-local DataFormat = {_FormatVersion = 1}
+local DataFormat = {}
 local DataFormatVersion = 1
 local DataFormatConversions = {}
 local DataOperationsQueues = {}
