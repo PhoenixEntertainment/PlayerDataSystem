@@ -432,7 +432,7 @@ function DataService:LoadData(Player,DatastoreName)
 	local GetDataSuccess,GetDataErrorMessage = pcall(function()
 		local KeyInfo;
 
-		Data,KeyInfo= Data_Datastore:GetAsync()
+		Data,KeyInfo= Data_Datastore:GetAsync(DATA_KEY_NAME)
 		Data_Metadata = KeyInfo:GetMetadata()
 	end)
 	if not GetDataSuccess then --! An error occured while getting the player's data
