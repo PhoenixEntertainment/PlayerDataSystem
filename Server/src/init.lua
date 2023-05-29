@@ -127,6 +127,7 @@ end
 --           OPTIONAL string "Format" - The format to return the data in. Acceptable formats are "Table" and "Folder".
 --           OPTIONAL bool "ShouldYield" - Whether or not the API should wait for the data to be fully loaded
 -- @Returns : <Variant> "Data" - The player's data
+--            table "Metadata" - The metadata of the player's data
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:GetData(Player,ShouldYield,Format)
 
@@ -179,11 +180,11 @@ function DataService:GetData(Player,ShouldYield,Format)
 	end
 
 	if Format == nil then
-		return DataFolder
+		return DataFolder,DataFolder:GetAttributes()
 	elseif string.upper(Format) == "TABLE" then
-		return Table.ConvertFolderToTable(DataFolder)
+		return Table.ConvertFolderToTable(DataFolder),DataFolder:GetAttributes()
 	elseif string.upper(Format) == "FOLDER" then
-		return DataFolder
+		return DataFolder,DataFolder:GetAttributes()
 	end
 end
 
