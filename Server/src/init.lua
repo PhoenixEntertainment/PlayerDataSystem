@@ -661,6 +661,7 @@ function DataService:Start()
 		local SetSessionLock_Success = false -- Determines whether or not the session lock was successfully enabled for this server
 		local LoadData_Success = false -- Determines whether or not the player's data was fetched successfully
 		local PlayerData;
+		local PlayerData_Metadata;
 
 		self:Log(
 			("[Data Service] Loading data for player '%s'..."):format(Player.Name)
@@ -841,7 +842,7 @@ function DataService:Start()
 				:format(DATASTORE_PRECISE_NAME,Player.Name)
 			)
 
-			local FetchDataSuccess,FetchDataMessage,Data = self:LoadData(Player,DATASTORE_PRECISE_NAME)
+			local FetchDataSuccess,FetchDataMessage,Data,Data_Metadata = self:LoadData(Player,DATASTORE_PRECISE_NAME)
 
 			if not FetchDataSuccess then
 				self:Log(
@@ -876,6 +877,8 @@ function DataService:Start()
 
 				LoadData_Success = true
 				PlayerData = Data
+				PlayerData_Metadata = Data_Metadata
+
 				break
 			end
 		end
@@ -887,13 +890,13 @@ function DataService:Start()
 				"Warning"
 			)
 
-			CreateDataCache(Player,Table.Copy(DataFormat),false)
+			CreateDataCache(Player,Table.Copy(DataFormat),{FormatVersion = DataFormatVersion},false)
 		else
 			self:Log(
 				("[Data Service] Successfully loaded data for player '%s'!"):format(Player.Name)
 			)
 
-			CreateDataCache(Player,PlayerData,true)
+			CreateDataCache(Player,PlayerData,PlayerData_Metadata,true)
 		end
 	end
 
