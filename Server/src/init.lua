@@ -35,6 +35,7 @@ local DATASTORE_RETRY_LIMIT = 2 --The max amount of retries an operation can be 
 local SESSION_LOCK_YIELD_INTERVAL = 5 -- The time (in seconds) at which the server will re-check a player's data session-lock.
                                       --! The interval should not be below 5 seconds, since Roblox caches keys for 4 seconds.
 local SESSION_LOCK_MAX_YIELD_INTERVALS = 5 -- The maximum amount of times the server will re-check a player's session-lock before ignoring it
+local DATA_KEY_NAME = "SaveData" -- The name of the key to use when saving/loading data to/from a datastore
 local DataFormat = {}
 local DataFormatVersion = 1
 local DataFormatConversions = {}
@@ -651,6 +652,7 @@ function DataService:SetConfigs(Configs)
 	DATASTORE_RETRY_LIMIT = Configs.DatastoreRetryLimit
 	SESSION_LOCK_YIELD_INTERVAL = Configs.SessionLockYieldInterval
 	SESSION_LOCK_MAX_YIELD_INTERVALS = Configs.SessionLockMaxYieldIntervals
+	DATA_KEY_NAME = Configs.DataKeyName
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
