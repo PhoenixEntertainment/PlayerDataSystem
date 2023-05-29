@@ -473,13 +473,13 @@ function DataService:LoadData(Player,DatastoreName)
 	------------------------------------------
 	if Data_Metadata.FormatVersion < DataFormatVersion then -- Data format is outdated, it needs to be updated.
 		self:DebugLog(
-			("[Data Service](LoadData) %s's data format is oudated, updating..."):format(Player.Name)
+			("[Data Service](LoadData) %s's data format is outdated, updating..."):format(Player.Name)
 		)
 
 		local DataFormatUpdateSuccess,DataFormatUpdateErrorMessage = pcall(function()
 			for _ = Data_Metadata.FormatVersion,DataFormatVersion - 1 do
 				self:DebugLog(
-					("[Data Service] Updating %s's data from version %s to version %s...")
+					("[Data Service](LoadData) Updating %s's data from version %s to version %s...")
 					:format(Player.Name,tostring(Data_Metadata.FormatVersion),tostring(Data_Metadata.FormatVersion + 1))
 				)
 
@@ -908,7 +908,7 @@ function DataService:Start()
 		local WriteData_Success = false -- Determines whether or not the player's data was successfully saved to datastores
 
 		Data_Metadata["_CanSave"] = nil
-		
+
 		self:Log(
 			("[Data Service] Saving data for player '%s'..."):format(Player.Name)
 		)
