@@ -522,11 +522,12 @@ end
 -- @Params : Instance <Player> 'Player' - the player to save the data of
 --           string "DatastoreName" - The name of the datastore to save the data to
 --           table "Data" - The table containing the data to save
+--           table "Data_Metadata" - The table containing the metadata of the data to save
 -- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
 --            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
 --                                        operation fails.
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:SaveData(Player,DatastoreName,Data)
+function DataService:SaveData(Player,DatastoreName,Data,Data_Metadata)
 
 	----------------
 	-- Assertions --
@@ -550,6 +551,24 @@ function DataService:SaveData(Player,DatastoreName,Data)
 		Data ~= nil,
 		"[Data Service](SaveData) Bad argument #3 to 'SaveData', Data expected, got nil."
 	)
+	assert(
+		Data_Metadata ~= nil,
+		"[Data Service](SaveData) Bad argument #4 to 'SaveData', table expected, got nil."
+	)
+	assert(
+		typeof(Data_Metadata) == "table",
+		("[Data Service](SaveData) Bad argument #4 to 'SaveData', table expected, got %s instead.")
+		:format(typeof(Data_Metadata))
+	)
+	assert(
+		Data_Metadata.FormatVersion ~= nil,
+		"[Data Service](SaveData) Bad argument #4 to 'SaveData', key `FormatVersion` expected, got nil."
+	)
+	assert(
+		typeof(Data_Metadata.FormatVersion) == "number",
+		("[Data Service](SaveData) Bad argument #4 to 'SaveData', key `FormatVersion` expected as number, got %s instead.")
+		:format(typeof(Data_Metadata.FormatVersion))
+	)
 
 	self:DebugLog(
 		("[Data Service](SaveData) Saving data for %s into datastore '%s'..."):format(Player.Name,DATASTORE_BASE_NAME.."_"..DatastoreName)
@@ -559,44 +578,14 @@ function DataService:SaveData(Player,DatastoreName,Data)
 	-- Defines --
 	-------------
 	local Data_Datastore = DatastoreService:GetDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_Data",tostring(Player.UserId))
-	local Pointer_Datastore = DatastoreService:GetOrderedDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_DataPointers",tostring(Player.UserId))
-	local Data_VersionNumber; --Holds the current version number of the data
-
-	-------------------------------------------
-	-- Fetching previous data version number --
-	-------------------------------------------
-	local GetDataVersionSuccess,GetDataVersionErrorMessage = pcall(function()
-		local Pages = Pointer_Datastore:GetSortedAsync(false,1)
-		local LatestKey = Pages:GetCurrentPage()[1]
-		local VersionNumber;
-
-		if LatestKey ~= nil then
-			VersionNumber = LatestKey.value
-		end
-		if VersionNumber == nil then --* It is the first time saving the data to this datastore
-			Data_VersionNumber = 1
-		else
-			Data_VersionNumber = VersionNumber + 1
-		end	
-	end)
-	if not GetDataVersionSuccess then --! An error occured while getting the player's data version number
-		self:Log(
-			("[Data Service](SaveData) An error occured while saving data for '%s' : Failed to get data version number, %s")
-			:format(Player.Name,GetDataVersionErrorMessage),
-			"Warning"
-		)
-
-		DataError:Fire(Player,"Save","FetchDataVersion",Data)
-		self.Client.DataError:FireAllClients(Player,"Save","FetchDataVersion",Data)
-
-		return false,"Failed to save data : Unable to get data version number, "..GetDataVersionErrorMessage
-	end
+	local DatastoreSetOptions = Instance.new('DataStoreSetOptions')
 
 	----------------------------------------------
 	-- Saving player's data to normal datastore --
 	----------------------------------------------
 	local SaveDataSuccess,SaveDataErrorMessage = pcall(function()
-		Data_Datastore:SetAsync(tostring(Data_VersionNumber),Data)
+		DatastoreSetOptions:SetMetadata(Data_Metadata)
+		Data_Datastore:SetAsync(DATA_KEY_NAME,Data,{},DatastoreSetOptions)
 	end)
 	if not SaveDataSuccess then --! An error occured while saving the player's data.
 		self:Log(
@@ -607,26 +596,7 @@ function DataService:SaveData(Player,DatastoreName,Data)
 		DataError:Fire(Player,"Save","SaveData",Data)
 		self.Client.DataError:FireAllClients(Player,"Save","SaveData",Data)
 
-		return false,"Failed to save data : "..SaveDataErrorMessage
-	end
-
-	-----------------------------------------------------
-	-- Saving data version number to ordered datastore --
-	-----------------------------------------------------
-	local SaveVersionNumberSuccess,SaveVersionNumberErrorMessage = pcall(function()
-		Pointer_Datastore:SetAsync(tostring(os.time()),Data_VersionNumber)
-	end)
-	if not SaveVersionNumberSuccess then --! An error occured while saving the data's version number
-		self:Log(
-			("[Data Service](SaveData) An error occured while saving data for '%s', failed to save data version number : %s")
-			:format(Player.Name,SaveVersionNumberErrorMessage),
-			"Warning"
-		)
-
-		DataError:Fire(Player,"Save","SaveDataVersion",Data)
-		self.Client.DataError:FireAllClients(Player,"Save","SaveDataVersion",Data)
-
-		return false,"Failed to save data : Unable to save data version number, "..SaveVersionNumberErrorMessage
+		return false,"Failed to save data : " .. SaveDataErrorMessage
 	end
 
 	self:DebugLog(
