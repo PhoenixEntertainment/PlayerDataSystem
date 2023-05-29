@@ -69,11 +69,15 @@ local function GetTotalQueuesSize()
 	return QueuesSize
 end
 
-local function CreateDataCache(Player,Data,CanSave)
+local function CreateDataCache(Player,Data,Metadata,CanSave)
 	local DataFolder = Table.ConvertTableToFolder(Data)
 	DataFolder.Name = tostring(Player.UserId)
 
-	DataFolder:SetAttribute("CanSave",CanSave)
+	for Key,Value in pairs(Metadata) do
+		DataFolder:SetAttribute(Key,Value)
+	end
+
+	DataFolder:SetAttribute("_CanSave",CanSave)
 	DataFolder.Parent = DataCache
 
 	DataService:DebugLog(
