@@ -23,6 +23,7 @@ jobs:
 
     - name: Build system components
       run: |
+        mkdir Temp
         rojo build Server/standalone.project.json --output Temp/PlayerDataSystem_Server.rbxm
         rojo build Client/standalone.project.json --output Temp/PlayerDataSystem_Client.rbxm
 
