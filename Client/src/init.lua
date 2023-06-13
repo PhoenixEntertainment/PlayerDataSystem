@@ -48,7 +48,7 @@ function DataController:GetData(YieldForLoad)
 		end
 	end
 
-	return PlayerData
+	return PlayerData,PlayerData:GetAttributes()
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
