@@ -1065,7 +1065,7 @@ function DataService:Start()
 
 		DataOperationsQueue:AddAction(
 			function()
-				if self:GetData(Player,false):GetAttribute("CanSave") == false then
+				if self:GetData(Player,false):GetAttribute("_CanSave") == false then
 					self:Log(
 						("[Data Service] Player '%s' left, but their data was marked as not saveable. Will not save data."):format(Player.Name),
 						"Warning"
