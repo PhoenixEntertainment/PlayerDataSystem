@@ -72,7 +72,21 @@ local function RetryOperation(Operation, RetryAmount, RetryInterval, OperationDe
 end
 
 local function AreQueuesEmpty()
-	return false
+	for _, OperationsQueue in pairs(DataOperationQueues) do
+		if OperationsQueue:IsExecuting() then
+			return false
+		end
+	end
+
+	return true
+end
+
+local function IsDataCacheEmpty()
+	for _, _ in pairs(DataCaches) do
+		return false
+	end
+
+	return true
 end
 
 local function GetSaveStore()
@@ -122,10 +136,24 @@ local function WriteSessionLock(Player, SessionID)
 	return Success
 end
 
+local function RemoveSessionLock(Player)
+	local Success = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+
+			SaveStore:RemoveAsync(tostring(Player.UserId) .. "/SessionLock")
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("remove sessionlock for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success
+end
+
 local function FetchDataFromStore(Player)
 	local Success, FetchedSaveData = RetryOperation(
 		function()
-			error("Simulated GetAsync() error")
 			local SaveStore = GetSaveStore()
 			local KeyData, KeyInfo = SaveStore:GetAsync(tostring(Player.UserId) .. "/SaveData")
 			local SaveData = CreateSaveData(Player)
@@ -155,7 +183,7 @@ local function FetchDataFromStore(Player)
 	return Success, FetchedSaveData
 end
 
-local function WriteToStore(Player, SaveData)
+local function WriteDataToStore(Player, SaveData)
 	if SaveData.IsTemporary then
 		DataService:Log(
 			("[Data Service] Player '%s' had temporary session-only data, aborting save!"):format(
@@ -164,8 +192,23 @@ local function WriteToStore(Player, SaveData)
 			"Warning"
 		)
 
-		return
+		return true
 	end
+
+	local Success = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+			local SetOptions = Instance.new("DataStoreSetOptions")
+
+			SetOptions:SetMetadata(SaveData.Metadata)
+			SaveStore:SetAsync(tostring(Player.UserId) .. "/SaveData", SaveData.Data, { Player.UserId }, SetOptions)
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("save data for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success
 end
 
 local function PlayerAdded(Player)
@@ -234,7 +277,7 @@ local function PlayerAdded(Player)
 						)
 					)
 
-					SavedData = DATA_SCHEMA.Migrators[SchemaVersion .. "->" .. SchemaVersion + 1](SavedData)
+					SavedData.Data = DATA_SCHEMA.Migrators[SchemaVersion .. " -> " .. SchemaVersion + 1](SavedData.Data)
 				end
 			end
 		end)
@@ -252,15 +295,15 @@ local function PlayerAdded(Player)
 		--------------------------------
 		-- Caching player's save data --
 		--------------------------------
-		if not LockSuccess then
+		if not GetDataSuccess then
 			DataService:Log(
-				("[Data Service] Couldn't sessionlock data for player '%s', data will be temporary."):format(
+				("[Data Service] Couldn't fetch save data from datastore for player '%s', data will be temporary."):format(
 					tostring(Player.UserId)
 				),
 				"Warning"
 			)
 
-			DataCaches[tostring(Player.UserId)] = SavedData
+			DataCaches[tostring(Player.UserId)] = CreateSaveData(Player)
 		elseif not MigrationSuccess then
 			DataService:Log(
 				("[Data Service] Couldn't migrate data schema for player '%s', data will be temporary."):format(
@@ -270,66 +313,85 @@ local function PlayerAdded(Player)
 			)
 
 			DataCaches[tostring(Player.UserId)] = CreateSaveData(Player)
-		elseif not GetDataSuccess then
+		elseif not LockSuccess then
 			DataService:Log(
-				("[Data Service] Couldn't fetch save data from datastore for player '%s', data will be temporary."):format(
+				("[Data Service] Couldn't sessionlock data for player '%s', data will be temporary."):format(
 					tostring(Player.UserId)
 				),
 				"Warning"
 			)
 
-			DataCaches[tostring(Player.UserId)] = CreateSaveData(Player)
+			DataCaches[tostring(Player.UserId)] = SavedData
 		else
 			DataService:Log(("[Data Service] Savedata cached for player '%s'!"):format(tostring(Player.UserId)))
 
 			SavedData.IsTemporary = false
 			DataCaches[tostring(Player.UserId)] = SavedData
 		end
+
+		print("[Data]", DataCaches[tostring(Player.UserId)])
 	end)
 
 	if not OperationsQueue:IsExecuting() then
+		DataService:DebugLog(
+			("[Data Service] Executing operations queue for player '%s'..."):format(tostring(Player.UserId))
+		)
 		OperationsQueue:Execute()
+		DataService:DebugLog(
+			("[Data Service] Operations queue for player '%s' has finished, preserving in cache for later save operations."):format(
+				tostring(Player.UserId)
+			)
+		)
 	end
-
-	print("[Data]", DataCaches[tostring(Player.UserId)])
 end
 
-local function PlayerRemoved(Player) end
+local function PlayerRemoved(Player)
+	local OperationsQueue
 
--- local function MigrateDataToLatestSchema(Data)
--- 	-- DataService:Log(
--- 	-- 	("[Data Service] Migrating data for player with ID '%s', their data schema is outdated..."):format(
--- 	-- 		tostring(Player.UserId)
--- 	-- 	)
--- 	-- )
+	DataService:Log(
+		("[Data Service] Player '%s' has left, writing their savedata to datastores and removing their cache..."):format(
+			tostring(Player.UserId)
+		)
+	)
 
--- 	local Success, Error = pcall(function()
--- 		for SchemaVersion = Data.Metadata.SchemaVersion, DATA_SCHEMA.Version - 1 do
--- 			DataService:DebugLog(
--- 				("[Data Service] Migrating data from schema %s to schema %s..."):format(
--- 					Data.Metadata.SchemaVersion,
--- 					DATA_SCHEMA.Version
--- 				)
--- 			)
--- 			Data = DATA_SCHEMA.Migrators[SchemaVersion .. "->" .. SchemaVersion + 1](Data)
--- 		end
--- 	end)
+	---------------------------------------------
+	-- Getting player's data operations queue --
+	---------------------------------------------
+	OperationsQueue = DataOperationQueues[tostring(Player.UserId)]
 
--- 	if not Success then
--- 		DataService:Log(
--- 			("[Data Service] Failed to migrate data from schema %s to schema %s : %s"):format(
--- 				Data.Metadata.SchemaVersion,
--- 				DATA_SCHEMA.Version,
--- 				Error
--- 			),
--- 			"Warning"
--- 		)
+	DataService:DebugLog(
+		("[Data Service] Using existing data operations queue for player '%s'."):format(tostring(Player.UserId))
+	)
 
--- 		return false
--- 	end
+	OperationsQueue:AddAction(function()
+		------------------------------------
+		-- Writing save data to datastore --
+		------------------------------------
+		WriteDataToStore(Player, DataCaches[tostring(Player.UserId)])
 
--- 	return true, Data
--- end
+		-------------------------
+		-- Clearing data cache --
+		-------------------------
+		DataCaches[tostring(Player.UserId)] = nil
+
+		---------------------------
+		-- Removing session lock --
+		---------------------------
+		RemoveSessionLock(Player)
+	end)
+
+	if not OperationsQueue:IsExecuting() then
+		DataService:DebugLog(
+			("[Data Service] Executing operations queue for player '%s'..."):format(tostring(Player.UserId))
+		)
+		OperationsQueue:Execute()
+		DataService:DebugLog(
+			("[Data Service] Operations queue for player '%s' has finished, destroying queue & removing from queue cache!"):format(
+				tostring(Player.UserId)
+			)
+		)
+	end
+end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- API Methods
@@ -356,6 +418,20 @@ function DataService:Init()
 	if not WasConfigured then
 		self:Log("[Data Service] The data service must be configured with Configure() before being used!", "Error")
 	end
+
+	game:BindToClose(function()
+		self:Log("[Data Service] Server is shuting down, keeping it open so any cached data can save...")
+
+		while true do
+			if not AreQueuesEmpty() then
+				task.wait()
+			else
+				break
+			end
+		end
+
+		self:Log("[Data Service] Data cache is empty and operation queues are empty, allowing shutdown!")
+	end)
 
 	self:DebugLog("[Data Service] Initialized!")
 end
