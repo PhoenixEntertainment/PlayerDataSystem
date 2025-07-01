@@ -1,6 +1,7 @@
 --!nocheck
 
-local DataService = {}
+local DataService = { Client = {} }
+DataService.Client.Server = DataService
 
 ---------------------
 -- Roblox Services --
@@ -27,9 +28,15 @@ local DATA_SCHEMA = {
 	Data = {},
 	Migrators = {},
 }
+local DATA_HANDLER_MODULE = nil
+local DATA_WRITERS = {}
+local DATA_READERS = {}
+local EVENTS = {}
 local WasConfigured = false
 local DataCaches = {}
+local DataSessionIDs = {}
 local DataOperationQueues = {}
+local ChangedCallbacks = {}
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- Helper methods
@@ -214,6 +221,7 @@ end
 local function PlayerAdded(Player)
 	local CurrentSessionID = HttpService:GenerateGUID(false)
 	local OperationsQueue
+	DataSessionIDs[tostring(Player.UserId)] = CurrentSessionID
 
 	DataService:Log(
 		("[Data Service] Player '%s' has joined, caching their savedata..."):format(tostring(Player.UserId))
@@ -279,6 +287,8 @@ local function PlayerAdded(Player)
 
 					SavedData.Data = DATA_SCHEMA.Migrators[SchemaVersion .. " -> " .. SchemaVersion + 1](SavedData.Data)
 				end
+
+				SavedData.Metadata.SchemaVersion = DATA_SCHEMA.Version
 			end
 		end)
 
@@ -329,6 +339,7 @@ local function PlayerAdded(Player)
 			DataCaches[tostring(Player.UserId)] = SavedData
 		end
 
+		EVENTS.DataLoaded:FireClient(Player, CurrentSessionID)
 		print("[Data]", DataCaches[tostring(Player.UserId)])
 	end)
 
@@ -398,14 +409,97 @@ end
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : WriteData
+-- @Description : Calls the specified writer function which writes the given data to the player's savedata
+-- @Params : Instance <Player> "Player" - The player whose data should be modified
+--           string "Writer" - The name of the writer function to call
+--           Tuple "Args" - The arguments to pass to the specified writer function
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:WriteData(Player, Writer, ...)
+	local ChangedParams = table.pack(DATA_WRITERS[Writer](DataCaches[tostring(Player.UserId)].Data, ...))
+	local DataName = ChangedParams[1]
+	ChangedParams[1] = Player
+
+	EVENTS.DataWritten:FireClient(Player, Writer, ...)
+
+	if ChangedCallbacks[DataName] ~= nil then
+		for _, Callback in pairs(ChangedCallbacks[DataName]) do
+			Callback(table.unpack(ChangedParams))
+		end
+	end
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : ReadData
+-- @Description : Calls the specified reader function which reads the given player's savedata
+-- @Params : Instance <Player> "Player" - The player whose data should be read from
+--           string "Reader" - The name of the reader function to call
+--           Tuple "Args" - The arguments to pass to the specified reader function
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:ReadData(Player, Reader, ...)
+	while true do
+		if not Player:IsDescendantOf(game) then
+			return nil
+		elseif DataCaches[tostring(Player.UserId)] ~= nil then
+			break
+		end
+
+		task.wait()
+	end
+
+	return DATA_READERS[Reader](Table.Copy(DataCaches[tostring(Player.UserId)].Data, true), ...)
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : OnDataChanged
+-- @Description : Invokes the given callback when the specified data is changed
+-- @Params : string "DataName" - The name of the data that should be listened to for changes
+--           function "ChangedCallback" - The function to invoke when the specified data is changed
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:OnDataChanged(DataName, ChangedCallback)
+	if ChangedCallbacks[DataName] ~= nil then
+		table.insert(ChangedCallbacks[DataName], ChangedCallback)
+	else
+		ChangedCallbacks[DataName] = { ChangedCallback }
+	end
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- @Name : Configure
 -- @Description : Sets the name of the datastore this service will use, as well as the schema & schema migration functions.
--- @Paarams : Table "Configs" - A table containing the configs for this service
+-- @Params : Table "Configs" - A table containing the configs for this service
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:Configure(Configs)
 	DATASTORE_NAME = Configs.DatastoreName
 	DATA_SCHEMA = Configs.Schema
+	DATA_HANDLER_MODULE = Configs.DataHandlers
+	DATA_WRITERS = require(Configs.DataHandlers).Writers
+	DATA_READERS = require(Configs.DataHandlers).Readers
 	WasConfigured = true
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Client.GetDataHandlerModule
+-- @Description : Returns a reference to the data handler module to the calling client
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService.Client:GetDataHandlerModule()
+	return DATA_HANDLER_MODULE
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Client.GetDataSessionID
+-- @Description : Returns the ID of the calling player's data session
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService.Client:GetDataSessionID(Player)
+	return DataSessionIDs[tostring(Player.UserId)]
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Client.RequestRawData
+-- @Description : Returns the calling player's savedata to their client
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService.Client:RequestRawData(Player)
+	return DataCaches[tostring(Player.UserId)].Data
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -414,6 +508,9 @@ end
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:Init()
 	self:DebugLog("[Data Service] Initializing...")
+
+	EVENTS.DataWritten = self:RegisterServiceClientEvent("DataWritten")
+	EVENTS.DataLoaded = self:RegisterServiceClientEvent("DataLoaded")
 
 	if not WasConfigured then
 		self:Log("[Data Service] The data service must be configured with Configure() before being used!", "Error")
