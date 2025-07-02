@@ -19,6 +19,7 @@ local DATA_READERS = {}
 local DATA_WRITERS = {}
 local EVENTS = {}
 local DataCache
+local ChangedCallbacks = {}
 local CurrentDataSessionID = ""
 local LocalPlayer = Players.LocalPlayer
 
@@ -26,7 +27,15 @@ local LocalPlayer = Players.LocalPlayer
 -- Helper functions
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 local function WriteData(Writer, ...)
-	DATA_WRITERS[Writer](DataCache, ...)
+	local DataChanges = table.pack(DATA_WRITERS[Writer](DataCache, ...))
+	local DataName = DataChanges[1]
+	DataChanges[1] = LocalPlayer
+
+	if ChangedCallbacks[DataName] ~= nil then
+		for _, Callback in pairs(ChangedCallbacks[DataName]) do
+			Callback(table.unpack(DataChanges))
+		end
+	end
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -51,6 +60,20 @@ function DataController:ReadData(Reader, ...)
 	end
 
 	return DATA_READERS[Reader](Table.Copy(DataCache, true), ...)
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : OnDataChanged
+-- @Description : Invokes the given callback when the specified data is changed
+-- @Params : string "DataName" - The name of the data that should be listened to for changes
+--           function "ChangedCallback" - The function to invoke when the specified data is changed
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:OnDataChanged(DataName, ChangedCallback)
+	if ChangedCallbacks[DataName] ~= nil then
+		table.insert(ChangedCallbacks[DataName], ChangedCallback)
+	else
+		ChangedCallbacks[DataName] = { ChangedCallback }
+	end
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
