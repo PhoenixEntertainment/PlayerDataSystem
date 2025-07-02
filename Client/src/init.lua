@@ -18,7 +18,7 @@ local Table = require(script.Parent.Table)
 local DATA_READERS = {}
 local DATA_WRITERS = {}
 local EVENTS = {}
-local DataCache = {}
+local DataCache
 local CurrentDataSessionID = ""
 local LocalPlayer = Players.LocalPlayer
 
@@ -79,7 +79,7 @@ function DataController:Start()
 	-- Getting current session ID --
 	--------------------------------
 	while true do
-		local DataSessionID = DataService:GetDataSessionID()
+		local DataSessionID = LocalPlayer:GetAttribute("SaveSessionID")
 
 		if DataSessionID ~= nil then
 			CurrentDataSessionID = DataSessionID
@@ -98,8 +98,9 @@ function DataController:Start()
 	end)
 
 	DataService.DataWritten:connect(function(Writer, ...)
-		WriteData(Writer, ...)
-
+		if DataCache ~= nil then
+			WriteData(Writer, ...)
+		end
 		print("[New Data]", DataCache)
 	end)
 end

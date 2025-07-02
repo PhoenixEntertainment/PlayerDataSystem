@@ -34,7 +34,6 @@ local DATA_READERS = {}
 local EVENTS = {}
 local WasConfigured = false
 local DataCaches = {}
-local DataSessionIDs = {}
 local DataOperationQueues = {}
 local ChangedCallbacks = {}
 
@@ -221,10 +220,11 @@ end
 local function PlayerAdded(Player)
 	local CurrentSessionID = HttpService:GenerateGUID(false)
 	local OperationsQueue
-	DataSessionIDs[tostring(Player.UserId)] = CurrentSessionID
+
+	Player:SetAttribute("SaveSessionID", CurrentSessionID)
 
 	DataService:Log(
-		("[Data Service] Player '%s' has joined, caching their savedata..."):format(tostring(Player.UserId))
+		("[Data Service] Player '%s' has joined, queued caching their savedata..."):format(tostring(Player.UserId))
 	)
 
 	---------------------------------------------
@@ -313,7 +313,7 @@ local function PlayerAdded(Player)
 				"Warning"
 			)
 
-			DataCaches[tostring(Player.UserId)] = CreateSaveData(Player)
+			DataCaches[Player:GetAttribute("SaveSessionID")] = CreateSaveData(Player)
 		elseif not MigrationSuccess then
 			DataService:Log(
 				("[Data Service] Couldn't migrate data schema for player '%s', data will be temporary."):format(
@@ -322,7 +322,7 @@ local function PlayerAdded(Player)
 				"Warning"
 			)
 
-			DataCaches[tostring(Player.UserId)] = CreateSaveData(Player)
+			DataCaches[Player:GetAttribute("SaveSessionID")] = CreateSaveData(Player)
 		elseif not LockSuccess then
 			DataService:Log(
 				("[Data Service] Couldn't sessionlock data for player '%s', data will be temporary."):format(
@@ -331,16 +331,15 @@ local function PlayerAdded(Player)
 				"Warning"
 			)
 
-			DataCaches[tostring(Player.UserId)] = SavedData
+			DataCaches[Player:GetAttribute("SaveSessionID")] = SavedData
 		else
 			DataService:Log(("[Data Service] Savedata cached for player '%s'!"):format(tostring(Player.UserId)))
 
 			SavedData.IsTemporary = false
-			DataCaches[tostring(Player.UserId)] = SavedData
+			DataCaches[Player:GetAttribute("SaveSessionID")] = SavedData
 		end
 
 		EVENTS.DataLoaded:FireClient(Player, CurrentSessionID)
-		print("[Data]", DataCaches[tostring(Player.UserId)])
 	end)
 
 	if not OperationsQueue:IsExecuting() then
@@ -360,7 +359,7 @@ local function PlayerRemoved(Player)
 	local OperationsQueue
 
 	DataService:Log(
-		("[Data Service] Player '%s' has left, writing their savedata to datastores and removing their cache..."):format(
+		("[Data Service] Player '%s' has left, queued writing their savedata to datastores and removing their savedata cache..."):format(
 			tostring(Player.UserId)
 		)
 	)
@@ -378,12 +377,13 @@ local function PlayerRemoved(Player)
 		------------------------------------
 		-- Writing save data to datastore --
 		------------------------------------
-		WriteDataToStore(Player, DataCaches[tostring(Player.UserId)])
+		WriteDataToStore(Player, DataCaches[Player:GetAttribute("SaveSessionID")])
 
 		-------------------------
 		-- Clearing data cache --
 		-------------------------
-		DataCaches[tostring(Player.UserId)] = nil
+		DataCaches[Player:GetAttribute("SaveSessionID")] = nil
+		DataService:Log(("[Data Service] Removed savedata cache for player '%s'!"):format(tostring(Player.UserId)))
 
 		---------------------------
 		-- Removing session lock --
@@ -416,15 +416,24 @@ end
 --           Tuple "Args" - The arguments to pass to the specified writer function
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:WriteData(Player, Writer, ...)
-	local ChangedParams = table.pack(DATA_WRITERS[Writer](DataCaches[tostring(Player.UserId)].Data, ...))
-	local DataName = ChangedParams[1]
-	ChangedParams[1] = Player
+	while true do
+		if not Player:IsDescendantOf(game) then
+			return
+		elseif DataCaches[Player:GetAttribute("SaveSessionID")] ~= nil then
+			break
+		end
+		task.wait()
+	end
+
+	local DataChanges = table.pack(DATA_WRITERS[Writer](DataCaches[Player:GetAttribute("SaveSessionID")].Data, ...))
+	local DataName = DataChanges[1]
+	DataChanges[1] = Player
 
 	EVENTS.DataWritten:FireClient(Player, Writer, ...)
 
 	if ChangedCallbacks[DataName] ~= nil then
 		for _, Callback in pairs(ChangedCallbacks[DataName]) do
-			Callback(table.unpack(ChangedParams))
+			Callback(table.unpack(DataChanges))
 		end
 	end
 end
@@ -440,14 +449,14 @@ function DataService:ReadData(Player, Reader, ...)
 	while true do
 		if not Player:IsDescendantOf(game) then
 			return nil
-		elseif DataCaches[tostring(Player.UserId)] ~= nil then
+		elseif DataCaches[Player:GetAttribute("SaveSessionID")] ~= nil then
 			break
 		end
 
 		task.wait()
 	end
 
-	return DATA_READERS[Reader](Table.Copy(DataCaches[tostring(Player.UserId)].Data, true), ...)
+	return DATA_READERS[Reader](Table.Copy(DataCaches[Player:GetAttribute("SaveSessionID")].Data, true), ...)
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -487,19 +496,11 @@ function DataService.Client:GetDataHandlerModule()
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Client.GetDataSessionID
--- @Description : Returns the ID of the calling player's data session
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService.Client:GetDataSessionID(Player)
-	return DataSessionIDs[tostring(Player.UserId)]
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- @Name : Client.RequestRawData
 -- @Description : Returns the calling player's savedata to their client
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService.Client:RequestRawData(Player)
-	return DataCaches[tostring(Player.UserId)].Data
+	return DataCaches[Player:GetAttribute("SaveSessionID")].Data
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
