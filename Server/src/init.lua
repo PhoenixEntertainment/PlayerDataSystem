@@ -87,14 +87,6 @@ local function AreQueuesEmpty()
 	return true
 end
 
-local function IsDataCacheEmpty()
-	for _, _ in pairs(DataCaches) do
-		return false
-	end
-
-	return true
-end
-
 local function GetSaveStore()
 	return DatastoreService:GetDataStore(DATASTORE_NAME)
 end

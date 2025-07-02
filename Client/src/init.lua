@@ -17,7 +17,6 @@ local Table = require(script.Parent.Table)
 -------------
 local DATA_READERS = {}
 local DATA_WRITERS = {}
-local EVENTS = {}
 local DataCache
 local ChangedCallbacks = {}
 local CurrentDataSessionID = ""
