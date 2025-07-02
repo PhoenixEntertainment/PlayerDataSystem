@@ -115,8 +115,6 @@ function DataController:Start()
 	DataService.DataLoaded:connect(function(SessionID)
 		if SessionID == CurrentDataSessionID then
 			DataCache = DataService:RequestRawData()
-
-			print("[Data]", DataCache)
 		end
 	end)
 
@@ -124,7 +122,6 @@ function DataController:Start()
 		if DataCache ~= nil then
 			WriteData(Writer, ...)
 		end
-		print("[New Data]", DataCache)
 	end)
 end
 
