@@ -12,5 +12,9 @@ return {
 		GetOwnedWeapons = function(Data)
 			return Data.OwnedItems.Weapons
 		end,
+
+		GetGold = function(Data)
+			return Data.Currency.Gold
+		end,
 	},
 }

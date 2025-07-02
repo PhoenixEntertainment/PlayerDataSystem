@@ -11,12 +11,14 @@ end
 local DataService = shared.DragonEngine:GetService("DataService")
 
 local function PlayerAdded(Player)
-	print("Reading data...")
-	print(DataService:ReadData(Player, "GetOwnedWeapons"))
-
 	while true do
+		if Player:IsDescendantOf(game) then
+			DataService:WriteData(Player, "GiveGold", 1)
+		else
+			break
+		end
+
 		task.wait(1)
-		DataService:WriteData(Player, "GiveGold", 1)
 	end
 end
 

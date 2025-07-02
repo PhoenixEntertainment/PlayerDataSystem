@@ -6,7 +6,7 @@ DataService:Configure({
 	DataHandlers = ReplicatedStorage.DataHandlers,
 	DatastoreName = "SysTest1",
 	Schema = {
-		Version = 2,
+		Version = 5,
 		Data = {
 			OwnedItems = {
 				Weapons = { "Red Crystal Sword" },
@@ -25,6 +25,25 @@ DataService:Configure({
 					Gold = Data.Gold,
 					Gems = 0,
 				}
+				Data.Gold = nil
+
+				return Data
+			end,
+
+			["2 -> 3"] = function(Data)
+				Data.DebugName = ""
+
+				return Data
+			end,
+
+			["3 -> 4"] = function(Data)
+				Data.Gold = 0
+				Data.DebugName = nil
+
+				return Data
+			end,
+
+			["4 -> 5"] = function(Data)
 				Data.Gold = nil
 
 				return Data
