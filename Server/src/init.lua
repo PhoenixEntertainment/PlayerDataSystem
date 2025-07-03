@@ -1,635 +1,498 @@
---[[
-	Data Service
+--!nocheck
 
-	Handles the loading, saving and management of player data
-
-	Backup system algorithm by @berezaa, modified and adapted by @Reshiram110
---]]
-
-local DataService={Client={}}
-DataService.Client.Server=DataService
+local DataService = { Client = {} }
+DataService.Client.Server = DataService
 
 ---------------------
 -- Roblox Services --
 ---------------------
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local DatastoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 
 ------------------
 -- Dependencies --
 ------------------
 local RobloxLibModules = require(script.Parent["roblox-libmodules"])
-local Table = require(RobloxLibModules.Utils.Table)
+local Table = require(script.Parent.Table)
 local Queue = require(RobloxLibModules.Classes.Queue)
 
 -------------
 -- Defines --
 -------------
-local DATASTORE_BASE_NAME = "Production" --The base name of the datastore to use
-local DATASTORE_PRECISE_NAME = "PlayerData1" --The name of the datastore to append to DATASTORE_BASE_NAME
-local DATASTORE_RETRY_ENABLED = true --Determines whether or not failed datastore calls will be retried
-local DATASTORE_RETRY_INTERVAL = 3 --The time (in seconds) to wait between each retry
-local DATASTORE_RETRY_LIMIT = 2 --The max amount of retries an operation can be retried before failing
-local SESSION_LOCK_YIELD_INTERVAL = 5 -- The time (in seconds) at which the server will re-check a player's data session-lock.
-                                      --! The interval should not be below 5 seconds, since Roblox caches keys for 4 seconds.
-local SESSION_LOCK_MAX_YIELD_INTERVALS = 5 -- The maximum amount of times the server will re-check a player's session-lock before ignoring it
-local DATA_KEY_NAME = "SaveData" -- The name of the key to use when saving/loading data to/from a datastore
-local DataFormat = {}
-local DataFormatVersion = 1
-local DataFormatConversions = {}
-local DataOperationsQueues = {}
-local DataLoaded_IDs = {}
-local DataCache = Instance.new('Folder') --Holds data for all players in ValueObject form
-DataCache.Name = "_DataCache"
-DataCache.Parent = ReplicatedStorage
-
-------------
--- Events --
-------------
-local DataError; --Fired on the server when there is an error handling the player's data
-local DataCreated; --Fired on the server when new data is created for a player.
-local DataLoaded; -- Fired to the client when its data is loaded into the server's cache
+local OPERATION_MAX_RETRIES = 3 -- The number of times any data operation will be attempted before aborting
+local OPERATION_RETRY_INTERVAL = 5 -- The number of seconds between each retry for any data operation. Recommended to keep this above 4 seconds, as Roblox GetAsync() calls cache data for 4 seconds.
+local DATASTORE_NAME = ""
+local DATA_SCHEMA = {
+	Version = 1,
+	Data = {},
+	Migrators = {},
+}
+local DATA_HANDLER_MODULE = nil
+local DATA_WRITERS = {}
+local DATA_READERS = {}
+local EVENTS = {}
+local WasConfigured = false
+local DataCaches = {}
+local DataOperationQueues = {}
+local ChangedCallbacks = {}
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- Helper functions
+-- Helper methods
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-local function GetOperationsQueue(Player)
-	return DataOperationsQueues[tostring(Player.UserId)]
-end
+local function RetryOperation(Operation, RetryAmount, RetryInterval, OperationDescription)
+	DataService:DebugLog(("[Data Service] Attempting to %s..."):format(OperationDescription))
 
-local function GetTotalQueuesSize()
-	local QueuesSize = 0
+	for TryCount = 1, RetryAmount do
+		local Success, Result = pcall(Operation)
 
-	for _,OperationsQueue in pairs(DataOperationsQueues) do
-		QueuesSize = QueuesSize + OperationsQueue:GetSize()
-	end
-
-	return QueuesSize
-end
-
-local function CreateDataCache(Player,Data,Metadata,CanSave)
-	local DataFolder = Table.ConvertTableToFolder(Data)
-	DataFolder.Name = tostring(Player.UserId)
-
-	for Key,Value in pairs(Metadata) do
-		DataFolder:SetAttribute(Key,Value)
-	end
-
-	DataFolder:SetAttribute("_CanSave",CanSave)
-	DataFolder.Parent = DataCache
-
-	DataService:DebugLog(
-		("[Data Service] Created data cache for player '%s', CanSave = %s!"):format(Player.Name,tostring(CanSave))
-	)
-end
-
-local function RemoveDataCache(Player)
-	local DataFolder = DataCache[tostring(Player.UserId)]
-	
-	DataFolder:Destroy()
-
-	DataService:DebugLog(
-		("[Data Service] Removed data cache for player '%s'!"):format(Player.Name)
-	)
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : IsDataLoaded
--- @Description : Returns a bool describing whether or not the specified player's data is loaded on the server or not.
--- @Params : Instance <Player> 'Player' - The player to check the data of
--- @Returns : bool "IsLoaded" - A bool describing whether or not the player's data is loaded on the server or not.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:IsDataLoaded(Player)
-
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](IsDataLoaded) Bad argument #1 to 'GetData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](IsDataLoaded) Bad argument #1 to 'GetData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-
-	return DataCache:FindFirstChild(tostring(Player.UserId)) ~= nil
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : GetData
--- @Description : Returns the data for the specified player and returns it in the specified format
--- @Params : Instance <Player> 'Player' - The player to get the data of
---           OPTIONAL string "Format" - The format to return the data in. Acceptable formats are "Table" and "Folder".
---           OPTIONAL bool "ShouldYield" - Whether or not the API should wait for the data to be fully loaded
--- @Returns : <Variant> "Data" - The player's data
---            table "Metadata" - The metadata of the player's data
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:GetData(Player,ShouldYield,Format)
-
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](GetData) Bad argument #1 to 'GetData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](GetData) Bad argument #1 to 'GetData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	if ShouldYield ~= nil then
-		assert(
-			typeof(ShouldYield) == "boolean",
-			("[Data Service](GetData) Bad argument #2 to 'GetData', bool expected, got %s instead.")
-			:format(typeof(ShouldYield))
-		)
-	end
-	if Format ~= nil then
-		assert(
-			typeof(Format) == "string",
-			("[Data Service](GetData) Bad argument #3 to 'GetData', string expected, got %s instead.")
-			:format(typeof(Format))
-		)
-		assert(
-			string.upper(Format) == "FOLDER" or string.upper(Format) == "TABLE",
-			("[Data Service](GetData) Bad argument #3 to 'GetData', invalid format. Valid formats are 'Table' or 'Folder', got '%s' instead.")
-			:format(Format)
-		)
-	end
-
-	local DataFolder = DataCache:FindFirstChild(tostring(Player.UserId))
-
-	if DataFolder == nil then --Player's data did not exist
-		if not ShouldYield then
-			self:Log(
-				("[Data Service](GetData) Failed to get data for player '%s', their data did not exist!"):format(Player.Name),
-				"Warning"
-			)
-
-			return nil
-		else
-			DataFolder = DataCache:WaitForChild(tostring(Player.UserId))
-		end
-	end
-
-	if Format == nil then
-		return DataFolder,DataFolder:GetAttributes()
-	elseif string.upper(Format) == "TABLE" then
-		return Table.ConvertFolderToTable(DataFolder),DataFolder:GetAttributes()
-	elseif string.upper(Format) == "FOLDER" then
-		return DataFolder,DataFolder:GetAttributes()
-	end
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Client.GetDataLoadedQueueID
--- @Description : Fetches & returns the unique queue ID associated with the queue action that loads the data for the client
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService.Client:GetDataLoadedQueueID(Player)
-	return DataLoaded_IDs[tostring(Player.UserId)]
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Client.GetDataFolderDescendantCount
--- @Description : Returns the number of descendants in the calling player's data folder
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService.Client:GetDataFolderDescendantCount(Player)
-	return #self.Server:GetData(Player):GetDescendants()
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : IsDataSessionlocked
--- @Description : Returns whether or not a player's data is session locked to another server
--- @Params : Instance <Player> 'Player' - The player to check the session lock status of
---           string "DatastoreName" - The name of the datastore to check the session lock in
--- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
---            string "OperationMessage" - A message describing the result of the operation. can contain errors if the
---                                        operation fails.
---            bool "IsSessionlocked" - A bool describing whether or not the player's data is session-locked in another server.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:IsDataSessionlocked(Player,DatastoreName)
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](IsDataSessionlocked) Bad argument #1 to 'IsDataSessionlocked', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](IsDataSessionlocked) Bad argument #1 to 'IsDataSessionlocked', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	assert(
-		typeof(DatastoreName) == "string",
-		("[Data Service](IsDataSessionlocked) Bad argument #2 to 'IsDataSessionlocked', string expected, got %s instead.")
-		:format(typeof(DatastoreName))
-	)
-
-	self:DebugLog(
-		("[Data Service](IsDataSessionlocked) Getting session lock for %s in datastore '%s'...")
-		:format(Player.Name,DATASTORE_BASE_NAME .. "_" .. DatastoreName)
-	)
-
-	local SessionLock_Datastore = DatastoreService:GetDataStore(
-		DATASTORE_BASE_NAME .. "_" .. DatastoreName .. "_SessionLocks",
-		tostring(Player.UserId)
-	)
-	local SessionLocked = false
-
-	local GetSessionLock_Success,GetSessionLock_Error = pcall(function()
-		SessionLocked = SessionLock_Datastore:GetAsync("SessionLock")
-	end)
-
-	if GetSessionLock_Success then
-		self:DebugLog(
-			("[Data Service](IsDataSessionLocked) Got session lock for %s!")
-			:format(Player.Name)
-		)
-
-		return true,"Operation Success",SessionLocked
-	else
-		self:Log(
-			("[Data Service](IsDataSessionlocked) An error occured while reading session-lock for '%s' : Could not read session-lock, %s")
-			:format(Player.Name,GetSessionLock_Error),
-			"Warning"
-		)
-
-		return false,"Failed to read session-lock : Could not read session-lock, " .. GetSessionLock_Error
-	end
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : SessionlockData
--- @Description : Locks the data for the specified player to the current server
--- @Params : Instance <Player> 'Player' - The player to session lock the data of
---           string "DatastoreName" - The name of the datastore to lock the data in
--- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
---            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
---                                        operation fails.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:SessionlockData(Player,DatastoreName)
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](SessionlockData) Bad argument #1 to 'SessionlockData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](SessionlockData) Bad argument #1 to 'SessionlockData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	assert(
-		typeof(DatastoreName) == "string",
-		("[Data Service](SessionlockData) Bad argument #2 to 'SessionlockData', string expected, got %s instead.")
-		:format(typeof(DatastoreName))
-	)
-
-	self:DebugLog(
-		("[Data Service](SessionlockData) Locking data for %s in datastore '%s'..."):format(Player.Name,DATASTORE_BASE_NAME.."_"..DatastoreName)
-	)
-
-	local SessionLock_Datastore = DatastoreService:GetDataStore(
-		DATASTORE_BASE_NAME .. "_" .. DatastoreName .. "_SessionLocks",
-		tostring(Player.UserId)
-	)
-
-	local WriteLock_Success,WriteLock_Error = pcall(function()
-		SessionLock_Datastore:SetAsync("SessionLock",true)
-	end)
-
-	if WriteLock_Success then
-		self:DebugLog(
-			("[Data Service](SessionlockData) Locked data for %s!")
-			:format(Player.Name)
-		)
-
-		return true,"Operation Success"
-	else
-		self:Log(
-			("[Data Service](SessionlockData) An error occured while session-locking data for '%s' : Could not write session-lock, %s")
-			:format(Player.Name,WriteLock_Error),
-			"Warning"
-		)
-
-		return false,"Failed to session-lock data : Could not write session-lock, " .. WriteLock_Error
-	end
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : UnSessionlockData
--- @Description : Unlocks the data for the specified player from the current server
--- @Params : Instance <Player> 'Player' - The player to un-session lock the data of
---           string "DatastoreName" - The name of the datastore to un-lock the data in
--- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
---            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
---                                        operation fails.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:UnSessionlockData(Player,DatastoreName)
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](UnSessionlockData) Bad argument #1 to 'UnSessionlockData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](UnSessionlockData) Bad argument #1 to 'UnSessionlockData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	assert(
-		typeof(DatastoreName) == "string",
-		("[Data Service](UnSessionlockData) Bad argument #2 to 'UnSessionlockData', string expected, got %s instead.")
-		:format(typeof(DatastoreName))
-	)
-
-	self:DebugLog(
-		("[Data Service](UnSessionlockData) Unlocking data for %s in datastore '%s'..."):format(Player.Name,DATASTORE_BASE_NAME.."_"..DatastoreName)
-	)
-
-	local SessionLock_Datastore = DatastoreService:GetDataStore(
-		DATASTORE_BASE_NAME .. "_" .. DatastoreName .. "_SessionLocks",
-		tostring(Player.UserId)
-	)
-
-	local WriteLock_Success,WriteLock_Error = pcall(function()
-		SessionLock_Datastore:SetAsync("SessionLock",false)
-	end)
-
-	if WriteLock_Success then
-		self:DebugLog(
-			("[Data Service](UnSessionlockData) Unlocked data for %s!")
-			:format(Player.Name)
-		)
-
-		return true,"Operation Success"
-	else
-		self:Log(
-			("[Data Service](UnSessionlockData) An error occured while un-session-locking data for '%s' : Could not write session-lock, %s")
-			:format(Player.Name,WriteLock_Error),
-			"Warning"
-		)
-
-		return false,"Failed to session-lock data : Could not write session-lock, " .. WriteLock_Error
-	end
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : LoadData
--- @Description : Loads the data for the specified player and returns it as a table
--- @Params : Instance <Player> 'Player' - The player to load the data of
---           string "DatastoreName" - The name of the datastore to load the data from
--- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
---            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
---                                        operation fails.
---            table "Data" - The player's data. Will be default data if the operation fails.
---            table "Metadata" - Metadata for the player's data. Will be default metadata if the operation fails.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:LoadData(Player,DatastoreName)
-
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](LoadData) Bad argument #1 to 'SaveData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](LoadData) Bad argument #1 to 'SaveData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	assert(
-		typeof(DatastoreName) == "string",
-		("[Data Service](LoadData) Bad argument #2 to 'SaveData', string expected, got %s instead.")
-		:format(typeof(DatastoreName))
-	)
-
-	self:DebugLog(
-		("[Data Service](LoadData) Loading data for %s from datastore '%s'..."):format(Player.Name,DATASTORE_BASE_NAME.."_"..DatastoreName)
-	)
-
-	-------------
-	-- Defines --
-	-------------
-	local Data_Datastore = DatastoreService:GetDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_Data",tostring(Player.UserId))
-	local Data; -- Holds the player's data
-	local Data_Metadata; -- Holds metadata for the save data
-
-	----------------------------------
-	-- Fetching data from datastore --
-	----------------------------------
-	local GetDataSuccess,GetDataErrorMessage = pcall(function()
-		local KeyInfo;
-
-		Data,KeyInfo = Data_Datastore:GetAsync(DATA_KEY_NAME)
-
-		if Data ~= nil then
-			Data_Metadata = KeyInfo:GetMetadata()
-		end
-	end)
-	if not GetDataSuccess then --! An error occured while getting the player's data
-		self:Log(
-			("[Data Service](LoadData) An error occured while loading data for player '%s' : %s")
-			:format(Player.Name,GetDataErrorMessage),
-			"Warning"
-		)
-
-		Data = Table.Copy(DataFormat)
-		DataError:Fire(Player,"Load","FetchData",Data)
-		self.Client.DataError:FireAllClients(Player,"Load","FetchData",Data)
-
-		return false,"Failed to load data : " .. GetDataErrorMessage,Data,{FormatVersion = DataFormatVersion}
-	else
-		if Data == nil then -- * It is the first time loading data from this datastore. Player must be new!
-			self:DebugLog(
-				("[Data Service](LoadData) Data created for the first time for player '%s', they may be new!"):format(Player.Name)
-			)
-
-			Data = Table.Copy(DataFormat)
-			DataCreated:Fire(Player,Data)
-			self.Client.DataCreated:FireAllClients(Player,Data)
-
-			return true,"Operation Success",Data,{FormatVersion = DataFormatVersion}
-		end
-	end
-
-	------------------------------------------
-	-- Updating the data's format if needed --
-	------------------------------------------
-	if Data_Metadata.FormatVersion < DataFormatVersion then -- Data format is outdated, it needs to be updated.
-		self:DebugLog(
-			("[Data Service](LoadData) %s's data format is outdated, updating..."):format(Player.Name)
-		)
-
-		local DataFormatUpdateSuccess,DataFormatUpdateErrorMessage = pcall(function()
-			for _ = Data_Metadata.FormatVersion,DataFormatVersion - 1 do
-				self:DebugLog(
-					("[Data Service](LoadData) Updating %s's data from version %s to version %s...")
-					:format(Player.Name,tostring(Data_Metadata.FormatVersion),tostring(Data_Metadata.FormatVersion + 1))
+		if not Success then
+			if TryCount ~= RetryAmount then
+				DataService:Log(
+					("[Data Service] Failed to %s : %s | RETRYING IN %s SECONDS!"):format(
+						OperationDescription,
+						Result,
+						tostring(RetryInterval)
+					),
+					"Warning"
 				)
 
-				Data = DataFormatConversions[tostring(Data_Metadata.FormatVersion) .. " -> " .. tostring(Data_Metadata.FormatVersion + 1)](Data)
-				Data_Metadata.FormatVersion = Data_Metadata.FormatVersion + 1
+				task.wait(RetryInterval)
+			else
+				DataService:Log(
+					("[Data Service] Failed to %s : %s | MAX RETRIES REACHED, ABORTING!"):format(
+						OperationDescription,
+						Result
+					),
+					"Warning"
+				)
+			end
+		else
+			DataService:DebugLog("[Data Service] " .. OperationDescription .. " succeeded!")
+
+			return true, Result
+		end
+	end
+
+	return false
+end
+
+local function AreQueuesEmpty()
+	for _, OperationsQueue in pairs(DataOperationQueues) do
+		if OperationsQueue:IsExecuting() then
+			return false
+		end
+	end
+
+	return true
+end
+
+local function GetSaveStore()
+	return DatastoreService:GetDataStore(DATASTORE_NAME)
+end
+
+local function CreateSaveData(Player)
+	return {
+		CreatedTime = DateTime.now(),
+		UpdatedTime = DateTime.now(),
+		Version = 1,
+		UserIDs = { Player.UserId },
+		Data = Table.Copy(DATA_SCHEMA.Data, true),
+		Metadata = { SchemaVersion = DATA_SCHEMA.Version },
+		IsTemporary = true, --! This should ALWAYS be defined as true here - we don't want the data to be savable unless NO operations have failed. Read-only is a safe default for critical data.
+	}
+end
+
+local function GetSessionLock(Player)
+	local SaveStore = GetSaveStore()
+	local Success, SessionLock = RetryOperation(
+		function()
+			local KeyValue = SaveStore:GetAsync(tostring(Player.UserId) .. "/SessionLock")
+
+			return KeyValue
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("fetch sessionlock for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success, SessionLock
+end
+
+local function WriteSessionLock(Player, SessionID)
+	local Success = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+
+			SaveStore:SetAsync(tostring(Player.UserId) .. "/SessionLock", SessionID, { Player.UserId })
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("write sessionlock for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success
+end
+
+local function RemoveSessionLock(Player)
+	local Success = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+
+			SaveStore:RemoveAsync(tostring(Player.UserId) .. "/SessionLock")
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("remove sessionlock for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success
+end
+
+local function FetchDataFromStore(Player)
+	local Success, FetchedSaveData = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+			local KeyData, KeyInfo = SaveStore:GetAsync(tostring(Player.UserId) .. "/SaveData")
+			local SaveData = CreateSaveData(Player)
+
+			if KeyData ~= nil then
+				SaveData.Data = KeyData
+				SaveData.CreatedTime = KeyInfo.CreatedTime
+				SaveData.UpdatedTime = KeyInfo.UpdatedTime
+				SaveData.Version = KeyInfo.Version
+				SaveData.Metadata = KeyInfo:GetMetadata()
+				SaveData.UserIDs = KeyInfo:GetUserIds()
+			else
+				DataService:DebugLog(
+					("[Data Service] Data does not exist for player '%s', they may be a new player! Giving default data."):format(
+						tostring(Player.UserId)
+					)
+				)
+			end
+
+			return SaveData
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("fetch data for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success, FetchedSaveData
+end
+
+local function WriteDataToStore(Player, SaveData)
+	if SaveData.IsTemporary then
+		DataService:Log(
+			("[Data Service] Player '%s' had temporary session-only data, aborting save!"):format(
+				tostring(Player.UserId)
+			),
+			"Warning"
+		)
+
+		return true
+	end
+
+	local Success = RetryOperation(
+		function()
+			local SaveStore = GetSaveStore()
+			local SetOptions = Instance.new("DataStoreSetOptions")
+
+			SetOptions:SetMetadata(SaveData.Metadata)
+			SaveStore:SetAsync(tostring(Player.UserId) .. "/SaveData", SaveData.Data, { Player.UserId }, SetOptions)
+		end,
+		OPERATION_MAX_RETRIES,
+		OPERATION_RETRY_INTERVAL,
+		("save data for player with ID '%s'"):format(tostring(Player.UserId))
+	)
+
+	return Success
+end
+
+local function PlayerAdded(Player)
+	local CurrentSessionID = HttpService:GenerateGUID(false)
+	local OperationsQueue
+
+	Player:SetAttribute("SaveSessionID", CurrentSessionID)
+
+	DataService:Log(
+		("[Data Service] Player '%s' has joined, queued caching their savedata..."):format(tostring(Player.UserId))
+	)
+
+	---------------------------------------------
+	-- Creating player's data operations queue --
+	---------------------------------------------
+	if DataOperationQueues[tostring(Player.UserId)] == nil then
+		OperationsQueue = Queue.new()
+		DataOperationQueues[tostring(Player.UserId)] = OperationsQueue
+
+		DataService:DebugLog(
+			("[Data Service] Created data operations queue for player '%s'."):format(tostring(Player.UserId))
+		)
+	else
+		OperationsQueue = DataOperationQueues[tostring(Player.UserId)]
+
+		DataService:DebugLog(
+			("[Data Service] Using existing data operations queue for player '%s'."):format(tostring(Player.UserId))
+		)
+	end
+
+	OperationsQueue:AddAction(function()
+		------------------------------------------------------------
+		-- Waiting for sessionlock & setting one for this session --
+		------------------------------------------------------------
+		RetryOperation(
+			function()
+				local _, SessionLock = GetSessionLock(Player)
+
+				if SessionLock ~= nil then
+					error("Sessionlock still exists.")
+				else
+					return
+				end
+			end,
+			OPERATION_MAX_RETRIES,
+			OPERATION_RETRY_INTERVAL,
+			("wait for sessionlock removal for player '%s'"):format(tostring(Player.UserId))
+		)
+		local LockSuccess = WriteSessionLock(Player, CurrentSessionID)
+
+		--------------------------------------------------------------
+		-- Fetching save data from datastore & migrating its schema --
+		--------------------------------------------------------------
+		local GetDataSuccess, SavedData = FetchDataFromStore(Player)
+		local MigrationSuccess, MigrationError = pcall(function()
+			if GetDataSuccess and SavedData.Metadata.SchemaVersion < DATA_SCHEMA.Version then
+				DataService:DebugLog(
+					("[Data Service] Player '%s' has an outdated data schema, migrating to latest..."):format(
+						tostring(Player.UserId)
+					)
+				)
+
+				for SchemaVersion = SavedData.Metadata.SchemaVersion, DATA_SCHEMA.Version - 1 do
+					DataService:DebugLog(
+						("[Data Service] Migrating data from schema %s to schema %s..."):format(
+							SavedData.Metadata.SchemaVersion,
+							DATA_SCHEMA.Version
+						)
+					)
+
+					SavedData.Data = DATA_SCHEMA.Migrators[SchemaVersion .. " -> " .. SchemaVersion + 1](SavedData.Data)
+				end
+
+				SavedData.Metadata.SchemaVersion = DATA_SCHEMA.Version
 			end
 		end)
 
-		if not DataFormatUpdateSuccess then --! An error occured while updating the player's data
-			self:Log(
-				("[Data Service](LoadData) An error occured while updating the data for player '%s' : %s")
-				:format(Player.Name,DataFormatUpdateErrorMessage),
+		if not MigrationSuccess then
+			DataService:Log(
+				("[Data Service] Failed to migrate data for player '%s' : %s"):format(
+					tostring(Player.UserId),
+					MigrationError
+				),
+				"Warning"
+			)
+		end
+
+		--------------------------------
+		-- Caching player's save data --
+		--------------------------------
+		if not GetDataSuccess then
+			DataService:Log(
+				("[Data Service] Couldn't fetch save data from datastore for player '%s', data will be temporary."):format(
+					tostring(Player.UserId)
+				),
 				"Warning"
 			)
 
-			Data = Table.Copy(DataFormat)
-			DataError:Fire(Player,"Load","FormatUpdate",Data)
-			self.Client.DataError:FireAllClients(Player,"Load","FormatUpdate",Data)
+			DataCaches[Player:GetAttribute("SaveSessionID")] = CreateSaveData(Player)
+		elseif not MigrationSuccess then
+			DataService:Log(
+				("[Data Service] Couldn't migrate data schema for player '%s', data will be temporary."):format(
+					tostring(Player.UserId)
+				),
+				"Warning"
+			)
 
-			return false,"Failed to load data : Update failed, " .. DataFormatUpdateErrorMessage,Data,{FormatVersion = DataFormatVersion}
+			DataCaches[Player:GetAttribute("SaveSessionID")] = CreateSaveData(Player)
+		elseif not LockSuccess then
+			DataService:Log(
+				("[Data Service] Couldn't sessionlock data for player '%s', data will be temporary."):format(
+					tostring(Player.UserId)
+				),
+				"Warning"
+			)
+
+			DataCaches[Player:GetAttribute("SaveSessionID")] = SavedData
+		else
+			DataService:Log(("[Data Service] Savedata cached for player '%s'!"):format(tostring(Player.UserId)))
+
+			SavedData.IsTemporary = false
+			DataCaches[Player:GetAttribute("SaveSessionID")] = SavedData
 		end
-	elseif Data_Metadata.FormatVersion == nil or Data_Metadata.FormatVersion > DataFormatVersion then -- Unreadable data format, do not load data.
-		self:Log(
-			("[Data Service](LoadData) An error occured while loading the data for player '%s' : %s")
-			:format(Player.Name,"Unknown data format"),
-			"Warning"
-		)
 
-		Data = Table.Copy(DataFormat)
-		DataError:Fire(Player,"Load","UnknownDataFormat",Data)
-
-		self.Client.DataError:FireAllClients(Player,"Load","UnknownDatFormat",Data)
-
-		return false,"Failed to load data : Unknown data format",Data,{FormatVersion = DataFormatVersion}
-	end
-
-	self:DebugLog(
-		("[Data Service](LoadData) Successfully loaded data for player '%s'!"):format(Player.Name)
-	)
-
-	return true,"Operation Success",Data,Data_Metadata
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : SaveData
--- @Description : Saves the data for the specified player into the specified datastore
--- @Params : Instance <Player> 'Player' - the player to save the data of
---           string "DatastoreName" - The name of the datastore to save the data to
---           table "Data" - The table containing the data to save
---           table "Data_Metadata" - The table containing the metadata of the data to save
--- @Returns : bool "OperationSucceeded" - A bool describing if the operation was successful or not
---            string "OperationMessage" - A message describing the result of the operation. Can contain errors if the
---                                        operation fails.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:SaveData(Player,DatastoreName,Data,Data_Metadata)
-
-	----------------
-	-- Assertions --
-	----------------
-	assert(
-		typeof(Player) == "Instance", 
-		("[Data Service](SaveData) Bad argument #1 to 'SaveData', Instance 'Player' expected, got %s instead.")
-		:format(typeof(Player))
-	)
-	assert(
-		Player:IsA("Player"),
-		("[Data Service](SaveData) Bad argument #1 to 'SaveData', Instance 'Player' expected, got Instance '%s' instead.")
-		:format(Player.ClassName)
-	)
-	assert(
-		typeof(DatastoreName) == "string",
-		("[Data Service](SaveData) Bad argument #2 to 'SaveData', string expected, got %s instead.")
-		:format(typeof(DatastoreName))
-	)
-	assert(
-		Data ~= nil,
-		"[Data Service](SaveData) Bad argument #3 to 'SaveData', Data expected, got nil."
-	)
-	assert(
-		Data_Metadata ~= nil,
-		"[Data Service](SaveData) Bad argument #4 to 'SaveData', table expected, got nil."
-	)
-	assert(
-		typeof(Data_Metadata) == "table",
-		("[Data Service](SaveData) Bad argument #4 to 'SaveData', table expected, got %s instead.")
-		:format(typeof(Data_Metadata))
-	)
-	assert(
-		Data_Metadata.FormatVersion ~= nil,
-		"[Data Service](SaveData) Bad argument #4 to 'SaveData', key `FormatVersion` expected, got nil."
-	)
-	assert(
-		typeof(Data_Metadata.FormatVersion) == "number",
-		("[Data Service](SaveData) Bad argument #4 to 'SaveData', key `FormatVersion` expected as number, got %s instead.")
-		:format(typeof(Data_Metadata.FormatVersion))
-	)
-
-	self:DebugLog(
-		("[Data Service](SaveData) Saving data for %s into datastore '%s'..."):format(Player.Name,DATASTORE_BASE_NAME.."_"..DatastoreName)
-	)
-
-	-------------
-	-- Defines --
-	-------------
-	local Data_Datastore = DatastoreService:GetDataStore(DATASTORE_BASE_NAME.."_"..DatastoreName.."_Data",tostring(Player.UserId))
-	local DatastoreSetOptions = Instance.new('DataStoreSetOptions')
-
-	----------------------------------------------
-	-- Saving player's data to normal datastore --
-	----------------------------------------------
-	local SaveDataSuccess,SaveDataErrorMessage = pcall(function()
-		DatastoreSetOptions:SetMetadata(Data_Metadata)
-		Data_Datastore:SetAsync(DATA_KEY_NAME,Data,{},DatastoreSetOptions)
+		EVENTS.DataLoaded:FireClient(Player, CurrentSessionID)
 	end)
-	if not SaveDataSuccess then --! An error occured while saving the player's data.
-		self:Log(
-			("[Data Service](SaveData) An error occured while saving data for '%s' : %s"):format(Player.Name,SaveDataErrorMessage),
-			"Warning"
+
+	if not OperationsQueue:IsExecuting() then
+		DataService:DebugLog(
+			("[Data Service] Executing operations queue for player '%s'..."):format(tostring(Player.UserId))
 		)
-
-		DataError:Fire(Player,"Save","SaveData",Data)
-		self.Client.DataError:FireAllClients(Player,"Save","SaveData",Data)
-
-		return false,"Failed to save data : " .. SaveDataErrorMessage
+		OperationsQueue:Execute()
+		DataService:DebugLog(
+			("[Data Service] Operations queue for player '%s' has finished, preserving in cache for later save operations."):format(
+				tostring(Player.UserId)
+			)
+		)
 	end
+end
 
-	self:DebugLog(
-		("[Data Service](SaveData) Data saved successfully into datastore '%s' for %s!"):format(DATASTORE_BASE_NAME.."_"..DatastoreName,Player.Name)
+local function PlayerRemoved(Player)
+	local OperationsQueue
+
+	DataService:Log(
+		("[Data Service] Player '%s' has left, queued writing their savedata to datastores and removing their savedata cache..."):format(
+			tostring(Player.UserId)
+		)
 	)
 
-	return true,"Operation Success"
+	---------------------------------------------
+	-- Getting player's data operations queue --
+	---------------------------------------------
+	OperationsQueue = DataOperationQueues[tostring(Player.UserId)]
+
+	DataService:DebugLog(
+		("[Data Service] Using existing data operations queue for player '%s'."):format(tostring(Player.UserId))
+	)
+
+	OperationsQueue:AddAction(function()
+		------------------------------------
+		-- Writing save data to datastore --
+		------------------------------------
+		WriteDataToStore(Player, DataCaches[Player:GetAttribute("SaveSessionID")])
+
+		-------------------------
+		-- Clearing data cache --
+		-------------------------
+		DataCaches[Player:GetAttribute("SaveSessionID")] = nil
+		DataService:Log(("[Data Service] Removed savedata cache for player '%s'!"):format(tostring(Player.UserId)))
+
+		---------------------------
+		-- Removing session lock --
+		---------------------------
+		RemoveSessionLock(Player)
+	end)
+
+	if not OperationsQueue:IsExecuting() then
+		DataService:DebugLog(
+			("[Data Service] Executing operations queue for player '%s'..."):format(tostring(Player.UserId))
+		)
+		OperationsQueue:Execute()
+		DataService:DebugLog(
+			("[Data Service] Operations queue for player '%s' has finished, destroying queue & removing from queue cache!"):format(
+				tostring(Player.UserId)
+			)
+		)
+	end
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : SetConfigs
--- @Description : Sets this service's configs to the specified values
--- @Params : table "Configs" - A dictionary containing the new config values
+-- API Methods
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:SetConfigs(Configs)
-	DataFormatVersion = Configs.DataFormatVersion
-	DataFormat = Configs.DataFormat
-	DataFormatConversions = Configs.DataFormatConversions
-	DATASTORE_BASE_NAME = Configs.DatastoreBaseName
-	DATASTORE_PRECISE_NAME = Configs.DatastorePreciseName
-	DATASTORE_RETRY_ENABLED = Configs.DatastoreRetryEnabled
-	DATASTORE_RETRY_INTERVAL = Configs.DatastoreRetryInterval
-	DATASTORE_RETRY_LIMIT = Configs.DatastoreRetryLimit
-	SESSION_LOCK_YIELD_INTERVAL = Configs.SessionLockYieldInterval
-	SESSION_LOCK_MAX_YIELD_INTERVALS = Configs.SessionLockMaxYieldIntervals
-	DATA_KEY_NAME = Configs.DataKeyName
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : WriteData
+-- @Description : Calls the specified writer function which writes the given data to the player's savedata
+-- @Params : Instance <Player> "Player" - The player whose data should be modified
+--           string "Writer" - The name of the writer function to call
+--           Tuple "Args" - The arguments to pass to the specified writer function
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:WriteData(Player, Writer, ...)
+	while true do
+		if not Player:IsDescendantOf(game) then
+			return
+		elseif DataCaches[Player:GetAttribute("SaveSessionID")] ~= nil then
+			break
+		end
+		task.wait()
+	end
+
+	local DataChanges = table.pack(DATA_WRITERS[Writer](DataCaches[Player:GetAttribute("SaveSessionID")].Data, ...))
+	local DataName = DataChanges[1]
+	DataChanges[1] = Player
+
+	EVENTS.DataWritten:FireClient(Player, Writer, ...)
+
+	if ChangedCallbacks[DataName] ~= nil then
+		for _, Callback in pairs(ChangedCallbacks[DataName]) do
+			Callback(table.unpack(DataChanges))
+		end
+	end
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : ReadData
+-- @Description : Calls the specified reader function which reads the given player's savedata
+-- @Params : Instance <Player> "Player" - The player whose data should be read from
+--           string "Reader" - The name of the reader function to call
+--           Tuple "Args" - The arguments to pass to the specified reader function
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:ReadData(Player, Reader, ...)
+	while true do
+		if not Player:IsDescendantOf(game) then
+			return nil
+		elseif DataCaches[Player:GetAttribute("SaveSessionID")] ~= nil then
+			break
+		end
+
+		task.wait()
+	end
+
+	return DATA_READERS[Reader](Table.Copy(DataCaches[Player:GetAttribute("SaveSessionID")].Data, true), ...)
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : OnDataChanged
+-- @Description : Invokes the given callback when the specified data is changed
+-- @Params : string "DataName" - The name of the data that should be listened to for changes
+--           function "ChangedCallback" - The function to invoke when the specified data is changed
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:OnDataChanged(DataName, ChangedCallback)
+	if ChangedCallbacks[DataName] ~= nil then
+		table.insert(ChangedCallbacks[DataName], ChangedCallback)
+	else
+		ChangedCallbacks[DataName] = { ChangedCallback }
+	end
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Configure
+-- @Description : Sets the name of the datastore this service will use, as well as the schema & schema migration functions.
+-- @Params : Table "Configs" - A table containing the configs for this service
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService:Configure(Configs)
+	DATASTORE_NAME = Configs.DatastoreName
+	DATA_SCHEMA = Configs.Schema
+	DATA_HANDLER_MODULE = Configs.DataHandlers
+	DATA_WRITERS = require(Configs.DataHandlers).Writers
+	DATA_READERS = require(Configs.DataHandlers).Readers
+	WasConfigured = true
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Client.GetDataHandlerModule
+-- @Description : Returns a reference to the data handler module to the calling client
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService.Client:GetDataHandlerModule()
+	return DATA_HANDLER_MODULE
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : Client.RequestRawData
+-- @Description : Returns the calling player's savedata to their client
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataService.Client:RequestRawData(Player)
+	return DataCaches[Player:GetAttribute("SaveSessionID")].Data
 end
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -637,11 +500,28 @@ end
 -- @Description : Called when the service module is first loaded.
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:Init()
-	DataLoaded = self:RegisterServiceClientEvent("DataLoaded")
-	DataCreated = self:RegisterServiceServerEvent("DataCreated")
-	DataError = self:RegisterServiceServerEvent("DataError")
-	self.Client.DataCreated = self:RegisterServiceClientEvent("DataCreated")
-	self.Client.DataError = self:RegisterServiceClientEvent("DataError")
+	self:DebugLog("[Data Service] Initializing...")
+
+	EVENTS.DataWritten = self:RegisterServiceClientEvent("DataWritten")
+	EVENTS.DataLoaded = self:RegisterServiceClientEvent("DataLoaded")
+
+	if not WasConfigured then
+		self:Log("[Data Service] The data service must be configured with Configure() before being used!", "Error")
+	end
+
+	game:BindToClose(function()
+		self:Log("[Data Service] Server is shuting down, keeping it open so any cached data can save...")
+
+		while true do
+			if not AreQueuesEmpty() then
+				task.wait()
+			else
+				break
+			end
+		end
+
+		self:Log("[Data Service] Data cache is empty and operation queues are empty, allowing shutdown!")
+	end)
 
 	self:DebugLog("[Data Service] Initialized!")
 end
@@ -651,480 +531,13 @@ end
 -- @Description : Called after all services are loaded.
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataService:Start()
-	self:DebugLog("[Data Service] Started!")
+	self:DebugLog("[Data Service] Running!")
 
-	-------------------------------------------
-	-- Loads player data into server's cache --
-	-------------------------------------------
-	local function LoadPlayerDataIntoServer(Player)
-		local WaitForSessionLock_Success = false -- Determines whether or not the session lock was waited for successfully
-		local SetSessionLock_Success = false -- Determines whether or not the session lock was successfully enabled for this server
-		local LoadData_Success = false -- Determines whether or not the player's data was fetched successfully
-		local PlayerData;
-		local PlayerData_Metadata;
-
-		self:Log(
-			("[Data Service] Loading data for player '%s'..."):format(Player.Name)
-		)
-
-		----------------------------------------------------
-		-- Waiting for other server's sessionlock removal --
-		----------------------------------------------------
-		self:DebugLog(
-			("[Data Service] Waiting for previous server to remove session lock for player '%s'...")
-			:format(Player.Name)
-		)
-
-		for SessionLock_YieldCount = 1,SESSION_LOCK_MAX_YIELD_INTERVALS do
-			local GetLockSuccess;
-			local OperationMessage;
-			local IsLocked;
-
-			--------------------------------
-			-- Reading session lock value --
-			--------------------------------
-			for RetryCount = 0, DATASTORE_RETRY_LIMIT do
-				self:DebugLog(
-					("[Data Service] Reading session lock for player '%s'..."):format(Player.Name)
-				)
-
-				GetLockSuccess,OperationMessage,IsLocked = self:IsDataSessionlocked(Player,DATASTORE_PRECISE_NAME)
-
-				if not GetLockSuccess then
-					self:Log(
-						("[Data Service] Failed to read session lock for player '%s' : %s"):format(Player.Name,OperationMessage),
-						"Warning"
-					)
-
-					if RetryCount == DATASTORE_RETRY_LIMIT then
-						self:Log(
-							("[Data Service] Max retries reached while attempting to read session lock for player '%s', aborting")
-							:format(Player.Name),
-							"Warning"
-						)
-
-						break
-					else
-						if DATASTORE_RETRY_ENABLED then
-							self:Log(
-								("[Data Service] Attempting to read session lock for player '%s' %s more times.")
-								:format(Player.Name,tostring(DATASTORE_RETRY_LIMIT - RetryCount))
-							)
-
-							task.wait(DATASTORE_RETRY_INTERVAL)
-						else
-							break
-						end
-					end
-				else
-					self:DebugLog(
-						("[Data Service] Got session lock for player '%s'!"):format(Player.Name)
-					)
-
-					break
-				end
-			end
-
-			--------------------------------------------
-			-- Determining if sessionlock was removed --
-			--------------------------------------------
-			if not GetLockSuccess then
-				break
-			end
-
-			if IsLocked then
-				if SessionLock_YieldCount == SESSION_LOCK_MAX_YIELD_INTERVALS then
-					self:Log(
-						("[Data Service] Timeout reached while waiting for previous server to remove its sessionlock for player '%s', ignoring it.")
-						:format(Player.Name),
-						"Warning"
-					)
-
-					WaitForSessionLock_Success = true
-				else
-					self:DebugLog(
-						("[Data Service] Previous server hasn't removed session lock for player '%s' yet, waiting %s seconds before re-reading.")
-						:format(Player.Name, tostring(SESSION_LOCK_YIELD_INTERVAL))
-					)
-				end
-
-				task.wait(SESSION_LOCK_YIELD_INTERVAL)
-			else
-				self:DebugLog(
-					("[Data Service] Previous server removed session lock for player '%s'!"):format(Player.Name)
-				)
-
-				WaitForSessionLock_Success = true
-				break
-			end
-		end
-
-		--------------------------
-		-- Setting session lock --
-		--------------------------
-		if not WaitForSessionLock_Success then
-			self:Log(
-				("[Data Service] Failed to set session lock to this server, giving player '%s' default data."):format(Player.Name),
-				"Warning"
-			)
-
-			CreateDataCache(Player,Table.Copy(DataFormat),false)
-			return
-		else
-			self:DebugLog(
-				("[Data Service] Setting session-lock for player '%s'..."):format(Player.Name)
-			)
-		end
-
-		for RetryCount = 1,DATASTORE_RETRY_LIMIT do
-			self:DebugLog(
-				("[Data Service] Writing sessionlock to datastore '%s' for player '%s'..."):format(DATASTORE_PRECISE_NAME,Player.Name)
-			)
-
-			local SetLockSuccess,SetLockMessage = self:SessionlockData(Player,DATASTORE_PRECISE_NAME)
-
-			if not SetLockSuccess then
-				self:Log(
-					("[Data Service] Failed to set session-lock for player '%s' : %s")
-					:format(Player.Name,SetLockMessage),
-					"Warning"
-				)
-
-				if DATASTORE_RETRY_ENABLED then
-					if RetryCount == DATASTORE_RETRY_LIMIT then
-						self:Log(
-							("[Data Service] Max retries reached while trying to session-lock data for player '%s', no further attempts will be made.")
-							:format(Player.Name),
-							"Warning"
-						)
-					else
-						self:Log(
-							("[Data Service] Retrying to session-lock data for player '%s', waiting %s seconds before retrying.")
-							:format(Player.Name,tostring(DATASTORE_RETRY_INTERVAL)),
-							"Warning"
-						)
-
-						task.wait(DATASTORE_RETRY_INTERVAL)
-					end
-				else
-					break
-				end
-			else
-				self:DebugLog(
-					("[Data Service] Successfully session-locked data for player '%s'!"):format(Player.Name)
-				)
-
-				SetSessionLock_Success = true
-				break
-			end
-		end
-
-		----------------------------
-		-- Fetching player's data --
-		----------------------------
-		if not SetSessionLock_Success then
-			self:Log(
-				("[Data Service] Failed to set session-lock, giving player '%s' default data."):format(Player.Name),
-				"Warning"
-			)
-
-			CreateDataCache(Player,Table.Copy(DataFormat),false)
-			return
-		else
-			self:DebugLog(
-				("[Data Service] Fetching data for player '%s' from datastore..."):format(Player.Name)
-			)
-		end
-
-		for RetryCount = 1,DATASTORE_RETRY_LIMIT do
-			self:DebugLog(
-				("[Data Service] Reading data from datastore '%s' for player '%s'...")
-				:format(DATASTORE_PRECISE_NAME,Player.Name)
-			)
-
-			local FetchDataSuccess,FetchDataMessage,Data,Data_Metadata = self:LoadData(Player,DATASTORE_PRECISE_NAME)
-
-			if not FetchDataSuccess then
-				self:Log(
-					("[Data Service] Failed to fetch data for player '%s' : %s")
-					:format(Player.Name,FetchDataMessage),
-					"Warning"
-				)
-
-				if DATASTORE_RETRY_ENABLED then
-					if RetryCount == DATASTORE_RETRY_LIMIT then
-						self:Log(
-							("[Data Service] Max retries reached while trying to load data for player '%s', no further attempts will be made.")
-							:format(Player.Name),
-							"Warning"
-						)
-					else
-						self:Log(
-							("[Data Service] Retrying to fetch data for player '%s', waiting %s seconds before retrying.")
-							:format(Player.Name,tostring(DATASTORE_RETRY_INTERVAL)),
-							"Warning"
-						)
-
-						task.wait(DATASTORE_RETRY_INTERVAL)
-					end
-				else
-					break
-				end
-			else
-				self:DebugLog(
-					("[Data Service] Successfully fetched data for player '%s' from datastores!"):format(Player.Name)
-				)
-
-				LoadData_Success = true
-				PlayerData = Data
-				PlayerData_Metadata = Data_Metadata
-
-				break
-			end
-		end
-
-		if not LoadData_Success then
-			self:Log(
-				("[Data Service] Failed to load data for player '%s', player will be given default data.")
-				:format(Player.Name),
-				"Warning"
-			)
-
-			CreateDataCache(Player,Table.Copy(DataFormat),{FormatVersion = DataFormatVersion},false)
-		else
-			self:Log(
-				("[Data Service] Successfully loaded data for player '%s'!"):format(Player.Name)
-			)
-
-			CreateDataCache(Player,PlayerData,PlayerData_Metadata,true)
-		end
+	for _, Player in pairs(Players:GetPlayers()) do
+		task.spawn(PlayerAdded, Player)
 	end
-
-	-------------------------------------------
-	-- Saves player data from servers' cache --
-	-------------------------------------------
-	local function SavePlayerDataFromServer(Player)
-		local PlayerData,Data_Metadata = self:GetData(Player,false,"Table")
-		local WriteData_Success = false -- Determines whether or not the player's data was successfully saved to datastores
-
-		Data_Metadata["_CanSave"] = nil
-
-		self:Log(
-			("[Data Service] Saving data for player '%s'..."):format(Player.Name)
-		)
-
-		-------------------------------
-		-- Writing data to datastore --
-		-------------------------------
-		self:DebugLog(
-			("[Data Service] Writing data to datastores for player '%s'..."):format(Player.Name)
-		)
-		for RetryCount = 1,DATASTORE_RETRY_LIMIT do
-			self:DebugLog(
-				("[Data Service] Writing data to datastore '%s' for player '%s'...")
-				:format(DATASTORE_PRECISE_NAME,Player.Name)
-			)
-
-			local WriteDataSuccess,WriteDataMessage = self:SaveData(Player,DATASTORE_PRECISE_NAME,PlayerData,Data_Metadata)
-
-			if not WriteDataSuccess then
-				self:Log(
-					("[Data Service] Failed to write data for player '%s' : %s")
-					:format(Player.Name,WriteDataMessage),
-					"Warning"
-				)
-
-				if DATASTORE_RETRY_ENABLED then
-					if RetryCount == DATASTORE_RETRY_LIMIT then
-						self:Log(
-							("[Data Service] Max retries reached while trying to write data for player '%s', no further attempts will be made.")
-							:format(Player.Name),
-							"Warning"
-						)
-					else
-						self:Log(
-							("[Data Service] Retrying to write data for player '%s', waiting %s seconds before retrying.")
-							:format(Player.Name,tostring(DATASTORE_RETRY_INTERVAL)),
-							"Warning"
-						)
-
-						task.wait(DATASTORE_RETRY_INTERVAL)
-					end
-				else
-					break
-				end
-			else
-				self:DebugLog(
-					("[Data Service] Successfully wrote data for player '%s' to datastores!"):format(Player.Name)
-				)
-
-				WriteData_Success = true
-				break
-			end
-		end
-
-		if not WriteData_Success then
-			self:Log(
-				("[Data Service] Failed to save data for player '%s'."):format(Player.Name),
-				"Warning"
-			)
-		else
-			self:Log(
-				("[Data Service] Successfully saved data for player '%s'!"):format(Player.Name)
-			)
-		end
-
-		----------------------------
-		-- Un-sessionlocking data --
-		----------------------------
-		self:DebugLog(
-			("[Data Service] Un-session locking data for player '%s'..."):format(Player.Name)
-		)
-
-		for RetryCount = 1,DATASTORE_RETRY_LIMIT do
-			self:DebugLog(
-				("[Data Service] Removing sessionlock from datastore '%s' for player '%s'..."):format(DATASTORE_PRECISE_NAME,Player.Name)
-			)
-
-			local RemoveLockSuccess,RemoveLockMessage = self:UnSessionlockData(Player,DATASTORE_PRECISE_NAME)
-
-			if not RemoveLockSuccess then
-				self:Log(
-					("[Data Service] Failed to remove session-lock for player '%s' : %s")
-					:format(Player.Name,RemoveLockMessage),
-					"Warning"
-				)
-
-				if DATASTORE_RETRY_ENABLED then
-					if RetryCount == DATASTORE_RETRY_LIMIT then
-						self:Log(
-							("[Data Service] Max retries reached while trying to remove session-lock for player '%s', no further attempts will be made.")
-							:format(Player.Name),
-							"Warning"
-						)
-					else
-						self:Log(
-							("[Data Service] Retrying to remove session-lock for player '%s', waiting %s seconds before retrying.")
-							:format(Player.Name,tostring(DATASTORE_RETRY_INTERVAL)),
-							"Warning"
-						)
-
-						task.wait(DATASTORE_RETRY_INTERVAL)
-					end
-				else
-					break
-				end
-			else
-				self:DebugLog(
-					("[Data Service] Successfully removed session-lock for player '%s'!"):format(Player.Name)
-				)
-
-				break
-			end
-		end
-
-		RemoveDataCache(Player)
-	end
-
-	---------------------------------
-	-- Loading player data on join --
-	---------------------------------
-	local function PlayerJoined(Player)
-		if GetOperationsQueue(Player) == nil then
-			DataOperationsQueues[tostring(Player.UserId)] = Queue.new()
-		end
-
-		local DataOperationsQueue = GetOperationsQueue(Player)
-
-		local QueueItemID = DataOperationsQueue:AddAction(
-			function()
-				LoadPlayerDataIntoServer(Player)
-			end,
-			function(ActionID)
-				DataLoaded:FireClient(Player,ActionID)
-			end
-		)
-		DataLoaded_IDs[tostring(Player.UserId)] = QueueItemID
-
-		if not DataOperationsQueue:IsExecuting() then
-			DataOperationsQueue:Execute()
-		end
-	end
-	Players.PlayerAdded:connect(PlayerJoined)
-	for _,Player in pairs(Players:GetPlayers()) do
-		coroutine.wrap(PlayerJoined)(Player)
-	end
-
-	---------------------------------
-	-- Saving player data on leave --
-	---------------------------------
-	local function PlayerLeaving(Player)
-		DataLoaded_IDs[tostring(Player.UserId)] = nil
-
-		local DataOperationsQueue = GetOperationsQueue(Player)
-
-		DataOperationsQueue:AddAction(
-			function()
-				if self:GetData(Player,false):GetAttribute("_CanSave") == false then
-					self:Log(
-						("[Data Service] Player '%s' left, but their data was marked as not saveable. Will not save data."):format(Player.Name),
-						"Warning"
-					)
-
-					RemoveDataCache(Player)
-					
-					return
-				else
-					SavePlayerDataFromServer(Player)
-				end
-			end,
-			function()
-				if DataOperationsQueue:GetSize() == 0 then
-					DataOperationsQueue:Destroy()
-					DataOperationsQueues[tostring(Player.UserId)] = nil
-				end
-			end
-		)
-
-		if not DataOperationsQueue:IsExecuting() then
-			DataOperationsQueue:Execute()
-		end
-	end
-	Players.PlayerRemoving:connect(PlayerLeaving)
-
-	--------------------------------------------------------------------------------
-	-- Ensuring that all player data is saved before letting the server shut down --
-	--------------------------------------------------------------------------------
-	game:BindToClose(function()
-		self:Log("[Data Service] Server shutting down, waiting for data operations queue to be empty...")
-
-		while true do -- Wait for all player data to be saved
-			if GetTotalQueuesSize() == 0 then
-				break
-			end
-			RunService.Stepped:wait()
-		end
-
-		self:Log("[Data Service] Operations queue is empty! Letting server shut down.")
-	end)
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Stop
--- @Description : Called when the service is being stopped.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:Stop()
-
-	self:Log("[Data Service] Stopped!")
-end
-
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : Unload
--- @Description : Called when the service is being unloaded.
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataService:Unload()
-
-	self:Log("[Data Service] Unloaded!")
+	Players.PlayerAdded:connect(PlayerAdded)
+	Players.PlayerRemoving:connect(PlayerRemoved)
 end
 
 return DataService

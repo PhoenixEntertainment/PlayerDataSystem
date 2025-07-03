@@ -1,137 +1,127 @@
---[[
-	Data controller
-	Handles the fetching of the player's data
---]]
-
 local DataController = {}
 
 ---------------------
 -- Roblox Services --
 ---------------------
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 
 ------------------
 -- Dependencies --
 ------------------
-local RobloxLibModules = require(script.Parent["roblox-libmodules"])
-local Table = require(RobloxLibModules.Utils.Table)
-local DataService;
+local DataService
+local DataHandlers
+local Table = require(script.Parent.Table)
 
 -------------
 -- Defines --
 -------------
-local DataCache;
-local PlayerData;
-local IsDataLoaded = false
+local DATA_READERS = {}
+local DATA_WRITERS = {}
+local DataCache
+local ChangedCallbacks = {}
+local CurrentDataSessionID = ""
+local LocalPlayer = Players.LocalPlayer
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : IsDataLoaded
--- @Description : Returns a bool describing whether or not the player's data has been fully replicated in
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataController:IsDataLoaded()
-	return IsDataLoaded
-end
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Helper functions
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+local function WriteData(Writer, ...)
+	local DataChanges = table.pack(DATA_WRITERS[Writer](DataCache, ...))
+	local DataName = DataChanges[1]
+	DataChanges[1] = LocalPlayer
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- @Name : GetData
--- @Description : Gets the player's data
--- @Params : OPTIONAL bool "YieldForLoad" - A bool describing whether or not the API will yield for the data to exist
---           OPTIONAL string "Format" - The format to return the data in. Acceptable formats are "Table" and "Folder".
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-function DataController:GetData(YieldForLoad,Format)
-
-	if YieldForLoad ~= nil then
-		assert(
-			typeof(YieldForLoad) == "boolean",
-			("[Data Service](GetData) Bad argument #2 to 'GetData', bool expected, got %s instead.")
-			:format(typeof(YieldForLoad))
-		)
-	end
-	if Format ~= nil then
-		assert(
-			typeof(Format) == "string",
-			("[Data Service](GetData) Bad argument #3 to 'GetData', string expected, got %s instead.")
-			:format(typeof(Format))
-		)
-		assert(
-			string.upper(Format) == "FOLDER" or string.upper(Format) == "TABLE",
-			("[Data Service](GetData) Bad argument #3 to 'GetData', invalid format. Valid formats are 'Table' or 'Folder', got '%s' instead.")
-			:format(Format)
-		)
-	end
-
-	if YieldForLoad then
-		while true do
-			if self:IsDataLoaded() then
-				break
-			else
-				RunService.Stepped:wait()
-			end
+	if ChangedCallbacks[DataName] ~= nil then
+		for _, Callback in pairs(ChangedCallbacks[DataName]) do
+			Callback(table.unpack(DataChanges))
 		end
 	end
+end
 
-	if Format == nil then
-		return PlayerData,PlayerData:GetAttributes()
-	elseif string.upper(Format) == "TABLE" then
-		return Table.ConvertFolderToTable(PlayerData),PlayerData:GetAttributes()
-	elseif string.upper(Format) == "FOLDER" then
-		return PlayerData,PlayerData:GetAttributes()
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- API Methods
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : ReadData
+-- @Description : Calls the specified reader function which reads the given player's savedata
+-- @Params : string "Reader" - The name of the reader function to call
+--           Tuple "Args" - The arguments to pass to the specified reader function
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:ReadData(Reader, ...)
+	while true do
+		if not LocalPlayer:IsDescendantOf(game) then
+			return nil
+		elseif DataCache ~= nil then
+			break
+		end
+
+		task.wait()
+	end
+
+	return DATA_READERS[Reader](Table.Copy(DataCache, true), ...)
+end
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Name : OnDataChanged
+-- @Description : Invokes the given callback when the specified data is changed
+-- @Params : string "DataName" - The name of the data that should be listened to for changes
+--           function "ChangedCallback" - The function to invoke when the specified data is changed
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+function DataController:OnDataChanged(DataName, ChangedCallback)
+	if ChangedCallbacks[DataName] ~= nil then
+		table.insert(ChangedCallbacks[DataName], ChangedCallback)
+	else
+		ChangedCallbacks[DataName] = { ChangedCallback }
 	end
 end
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- @Name : Init
--- @Description : Used to initialize controller state
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Description : Called when the service module is first loaded.
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataController:Init()
 	self:DebugLog("[Data Controller] Initializing...")
 
 	DataService = self:GetService("DataService")
-
-	-----------------------------------
-	-- Waiting for data to be loaded --
-	-----------------------------------
-	local Loaded = false
-	local LoadedID = DataService:GetDataLoadedQueueID()
-
-	DataService.DataLoaded:connect(function(QueueID)
-		if QueueID == LoadedID then
-			Loaded = true
-		end
-	end)
-
-	while true do
-		if Loaded then
-			break
-		else
-			RunService.Stepped:wait()
-		end
-	end
-
-	local DescendantCount = DataService:GetDataFolderDescendantCount()
-	DataCache = ReplicatedStorage:WaitForChild("_DataCache")
-	PlayerData = DataCache:WaitForChild(tostring(Players.LocalPlayer.UserId))
-
-	while true do
-		if #self:GetData():GetDescendants() >= DescendantCount then
-			break
-		end
-		RunService.Stepped:wait()
-	end
-	IsDataLoaded = true
+	DataHandlers = require(DataService:GetDataHandlerModule())
+	DATA_WRITERS = DataHandlers.Writers
+	DATA_READERS = DataHandlers.Readers
 
 	self:DebugLog("[Data Controller] Initialized!")
 end
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- @Name : Start
--- @Description : Used to run the controller
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- @Description : Called after all services are loaded.
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 function DataController:Start()
 	self:DebugLog("[Data Controller] Running!")
-	
+
+	--------------------------------
+	-- Getting current session ID --
+	--------------------------------
+	while true do
+		local DataSessionID = LocalPlayer:GetAttribute("SaveSessionID")
+
+		if DataSessionID ~= nil then
+			CurrentDataSessionID = DataSessionID
+
+			break
+		end
+		task.wait(0.5)
+	end
+
+	DataService.DataLoaded:connect(function(SessionID)
+		if SessionID == CurrentDataSessionID then
+			DataCache = DataService:RequestRawData()
+		end
+	end)
+
+	DataService.DataWritten:connect(function(Writer, ...)
+		if DataCache ~= nil then
+			WriteData(Writer, ...)
+		end
+	end)
 end
 
 return DataController
