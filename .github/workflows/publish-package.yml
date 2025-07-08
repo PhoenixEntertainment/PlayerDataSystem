@@ -21,11 +21,16 @@ jobs:
           echo "https://phoenixentertainment:${{ secrets.REPOS_READ }}@github.com" > git-credentials
           git config --global credential.helper 'store --file git-credentials'
 
+      - name: Authenticate into wally backend
+        env:
+          WALLY_AUTH: ${{ secrets.WALLY_WRITE }}
+        run: |
+          mkdir -p ~/.wally
+          echo "$WALLY_AUTH" > ~/.wally/auth.toml
+
       - name: Publish wally packages
         env:
           WALLY_AUTH: ${{ secrets.WALLY_AUTH }}
         run: |
-          wally login --token "$WALLY_AUTH" --project-path Server/
-          wally publish --project-path Server/
-          wally login --token "$WALLY_AUTH" --project-path Client/
-          wally publish --project-path Client/
+          wally publish --project-path src/Server/
+          wally publish --project-path src/Client/
