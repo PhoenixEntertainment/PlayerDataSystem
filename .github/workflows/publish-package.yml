@@ -32,5 +32,5 @@ jobs:
         env:
           WALLY_AUTH: ${{ secrets.WALLY_AUTH }}
         run: |
-          wally publish --project-path src/Server/
-          wally publish --project-path src/Client/
+          wally publish --project-path Server/
+          wally publish --project-path Client/
