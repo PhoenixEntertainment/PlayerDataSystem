@@ -20,6 +20,7 @@ jobs:
         env:
           WALLY_AUTH: ${{ secrets.WALLY_AUTH }}
         run: |
-          wally login --token "$WALLY_AUTH"
+          wally login --token "$WALLY_AUTH" --project-path Server/
           wally publish --project-path Server/
+          wally login --token "$WALLY_AUTH" --project-path Client/
           wally publish --project-path Client/
