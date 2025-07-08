@@ -16,6 +16,11 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Authenticate with git
+        run: |
+          echo "https://phoenixentertainment:${{ secrets.REPOS_READ }}@github.com" > git-credentials
+          git config --global credential.helper 'store --file git-credentials'
+
       - name: Publish wally packages
         env:
           WALLY_AUTH: ${{ secrets.WALLY_AUTH }}
