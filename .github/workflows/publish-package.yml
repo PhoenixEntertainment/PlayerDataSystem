@@ -29,8 +29,6 @@ jobs:
           echo "$WALLY_AUTH" > ~/.wally/auth.toml
 
       - name: Publish wally packages
-        env:
-          WALLY_AUTH: ${{ secrets.WALLY_AUTH }}
         run: |
           wally publish --project-path Server/
           wally publish --project-path Client/
