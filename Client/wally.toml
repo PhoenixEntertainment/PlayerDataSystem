@@ -1,7 +1,7 @@
 [package]
 name = "phoenixentertainment/playerdatasystem-client"
 description = "Player data system client"
-version = "3.0.0-rc.1"
+version = "3.0.0-citest.1"
 authors = ["Noble_Draconian"]
 realm = "shared"
 registry = "https://github.com/UpliftGames/wally-index"
