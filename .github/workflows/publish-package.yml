@@ -5,30 +5,5 @@ on:
 
 jobs:
   package-publish:
-    name: Publish packages to wally registry
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
-
-      - name: Setup aftman
-        uses: ok-nick/setup-aftman@c52e3c91524316f8ca696574d576ea21b7518ec8
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Authenticate with git
-        run: |
-          echo "https://phoenixentertainment:${{ secrets.REPOS_READ }}@github.com" > git-credentials
-          git config --global credential.helper 'store --file git-credentials'
-
-      - name: Authenticate into wally backend
-        env:
-          WALLY_AUTH: ${{ secrets.WALLY_WRITE }}
-        run: |
-          mkdir -p ~/.wally
-          echo "$WALLY_AUTH" > ~/.wally/auth.toml
-
-      - name: Publish wally packages
-        run: |
-          wally publish --project-path Server/
-          wally publish --project-path Client/
+    uses: PhoenixEntertainment/Package-CI/.github/workflows/PackagePublish.yml@master
+    secrets: inherit
