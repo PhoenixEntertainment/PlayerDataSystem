@@ -5,8 +5,4 @@ on:
       - 'v*'
 jobs:
   release:
-    name: Create system release
-    runs-on: ubuntu-latest
-    steps:
-    - name: Create release
-      uses: PhoenixEntertainment/Package-CI/.github/workflows/PackageRelease@master
+    uses: PhoenixEntertainment/Package-CI/.github/workflows/PackageRelease.yml@master
