@@ -6,3 +6,4 @@ on:
 jobs:
   release:
     uses: PhoenixEntertainment/Package-CI/.github/workflows/PackageRelease.yml@master
+    secrets: inherit
